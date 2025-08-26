@@ -8,7 +8,30 @@ import re
 # ----------------------------
 # Config
 # ----------------------------
+
+
 st.set_page_config(page_title="Project Updates", layout="wide")
+
+hide_streamlit_style = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {visibility: hidden;}
+    .viewerBadge_link__1S137 {display: none !important;}
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+hide_streamlit_style = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stDeployButton {display: none;}
+    .viewerBadge_link__qRIco {display: none;}
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # Use Postgres in prod via env DATABASE_URL; fallback to local SQLite for dev
 DATABASE_URL = (
