@@ -159,14 +159,15 @@ def consolidate_by_bid_name(df: pd.DataFrame, key_col="Bid Name") -> pd.DataFram
     )
 
 def filter_required_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only rows with non-empty Project Name AND Address (whitespace counts as empty)."""
+    """Keep only rows with non-empty Project Name AND Address."""
     df = df.copy()
     for col in ["Project Name", "Address"]:
         if col not in df.columns:
             raise ValueError(f"Missing required column: {col}")
-        df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].fillna("").astype(str).str.strip()
     keep = (df["Project Name"] != "") & (df["Address"] != "")
     return df[keep]
+
 
 
 def quote_ident(col: str) -> str:
@@ -321,33 +322,30 @@ def load_results():
     return df
 
 def replace_inputs_from_excel(file) -> int:
-    """Replace entire inputs table with consolidated rows by Bid Name (dropping blanks in required fields)."""
     try:
-        df_up = pd.read_excel(file, dtype=str)
+        df_up = pd.read_excel(file, dtype=str, keep_default_na=False)
+
         if list(df_up.columns) != EXPECTED_INPUT_COLS:
             raise ValueError("Column names/order must match the example exactly.")
 
-        # drop rows with missing Project Name / Address
         before = len(df_up)
         df_up = filter_required_rows(df_up)
-        after_keep = len(df_up)
-        dropped = before - after_keep
+        dropped = before - len(df_up)
 
-        # consolidate to one row per Bid Name
         clean = consolidate_by_bid_name(df_up)
 
         with engine.begin() as conn:
             conn.exec_driver_sql("DELETE FROM inputs;")
         clean.to_sql("inputs", con=engine, if_exists="append", index=False, method="multi")
 
-        load_inputs.clear()  # bust cache
-
+        load_inputs.clear()
         if dropped > 0:
             st.info(f"Dropped {dropped} row(s) with blank Project Name and/or Address.")
         return len(clean)
     except Exception as e:
         st.error(f"Upload failed: {e}")
         return 0
+
 
 
 # ----------------------------
@@ -581,20 +579,18 @@ elif page == "Inputs":
 
     if up:
         try:
-            preview = pd.read_excel(up, dtype=str)
-
+            preview = pd.read_excel(up, dtype=str, keep_default_na=False)
             if list(preview.columns) == EXPECTED_INPUT_COLS:
                 filtered = filter_required_rows(preview)
                 after = consolidate_by_bid_name(filtered)
-
                 dropped = len(preview) - len(filtered)
-                st.write(f"Preview (Number of open bids after consolidation: {len(after)})")
                 if dropped > 0:
                     st.info(f"Dropped {dropped} row(s) with blank Project Name and/or Address before consolidation.")
-
+                st.write(f"Preview (Number of open bids after consolidation: {len(after)})")
                 st.dataframe(after.head(10), use_container_width=True)
             else:
                 st.info("Fix column headers to match exactly before consolidation.")
+
         except Exception as e:
             st.error(f"Could not read Excel: {e}")
 
