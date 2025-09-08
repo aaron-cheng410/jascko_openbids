@@ -53,7 +53,10 @@ EXPECTED_INPUT_COLS = [
     "Plan & Specs/ Job Info"
 ]
 
-ARTICLE_COLS = ["Article Title", "Article Date", "Scraped Date", "Article Link"]
+ARTICLE_COLS = [
+    "Article Title", "Article Date", "Scraped Date", "Article Link",
+    "Article Summary", "Milestone Mentions"
+]
 
 # ----------------------------
 # Schema helpers
@@ -61,6 +64,38 @@ ARTICLE_COLS = ["Article Title", "Article Date", "Scraped Date", "Article Link"]
 
 JOIN_DELIM = " + "
 SPLIT_PATTERN = r"\s*\+\s*"   # split ONLY on ';' or '+' (never commas)
+
+def delete_results_rows(rows_df: pd.DataFrame):
+    """Delete rows from `results` using a stable key."""
+    if rows_df.empty:
+        return 0
+    n = 0
+    with engine.begin() as conn:
+        for _, r in rows_df.iterrows():
+            conn.execute(
+                text('DELETE FROM results WHERE "Project Name"=:pn AND "Address"=:addr AND "Article Link"=:al'),
+                {
+                    "pn": str(r.get("Project Name", "")),
+                    "addr": str(r.get("Address", "")),
+                    "al": str(r.get("Article Link", "")),
+                },
+            )
+            n += 1
+    return n
+
+def delete_general_rows(rows_df: pd.DataFrame):
+    """Delete rows from `general` using a stable key."""
+    if rows_df.empty:
+        return 0
+    n = 0
+    with engine.begin() as conn:
+        for _, r in rows_df.iterrows():
+            conn.execute(
+                text('DELETE FROM general WHERE "Project Name"=:pn AND "Article Link"=:al'),
+                {"pn": str(r.get("Project Name", "")), "al": str(r.get("Article Link", ""))},
+            )
+            n += 1
+    return n
 
 def split_for_dedupe(cell):
     if pd.isna(cell):
@@ -72,6 +107,31 @@ def split_for_dedupe(cell):
     parts = [p.strip() for p in parts if p.strip()]
     # if no real split happened, keep the whole cell as one token
     return parts if len(parts) > 1 else [s]
+
+def reorder_for_dashboard(df: pd.DataFrame) -> pd.DataFrame:
+    cols = list(df.columns)
+    new_order = []
+
+    # 1) Bid Name
+    if "Bid Name" in cols:
+        new_order.append("Bid Name")
+
+    # 2) Article cols (only those that exist)
+    for c in ARTICLE_COLS:
+        if c in cols:
+            new_order.append(c)
+
+    # 3) Remaining input cols (excluding Bid Name)
+    for c in EXPECTED_INPUT_COLS:
+        if c != "Bid Name" and c in cols and c not in new_order:
+            new_order.append(c)
+
+    # 4) Anything left (safety)
+    for c in cols:
+        if c not in new_order:
+            new_order.append(c)
+
+    return df[new_order]
 
 def join_unique(series: pd.Series, delim=JOIN_DELIM) -> str:
     seen, ordered = set(), []
@@ -194,7 +254,39 @@ def seed_inputs_if_empty():
     except Exception as e:
         st.error(f"Failed to seed inputs: {e}")
 
+def ensure_general_table():
+    insp = inspect(engine)
+    if not insp.has_table("general"):
+        # created by scraper, but guard for local dev
+        cols_sql = ", ".join(f'{quote_ident(c)} TEXT' for c in [
+            "Project Name","Architect","Possible Engineer","Article Title","Article Date","Scraped Date",
+            "Article Link","Article Summary","Milestone Mentions"
+        ])
+        with engine.begin() as conn:
+            conn.execute(text(f"CREATE TABLE general ({cols_sql})"))
+
+@st.cache_data(ttl=60)
+def load_general():
+    cols = [
+        "Project Name","Architect","Possible Engineer","Article Title","Article Date","Scraped Date",
+        "Article Link","Article Summary","Milestone Mentions"
+    ]
+    q = f"SELECT {', '.join(quote_ident(c) for c in cols)} FROM general ORDER BY {quote_ident('Scraped Date')} DESC"
+    df = pd.read_sql(q, engine)
+    if "Scraped Date" in df.columns:
+        df["Scraped Date"] = pd.to_datetime(df["Scraped Date"], errors="coerce")
+    return df
+
+def reorder_general(df: pd.DataFrame) -> pd.DataFrame:
+    priority = ["Project Name","Architect"] + [
+        "Possible Engineer","Article Title","Article Date","Scraped Date","Article Link","Article Summary","Milestone Mentions"
+    ]
+    order = [c for c in priority if c in df.columns] + [c for c in df.columns if c not in priority]
+    return df[order]
+
+
 # Bootstrap/migrate schema every start
+ensure_general_table()
 ensure_inputs_table(EXPECTED_INPUT_COLS)
 ensure_results_table(EXPECTED_INPUT_COLS)
 seed_inputs_if_empty()
@@ -244,9 +336,9 @@ def replace_inputs_from_excel(file) -> int:
 # UI
 # ----------------------------
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Dashboard", "Open Bids"])
+page = st.sidebar.radio("Go to", ["Open Bids Dashboard", "General Dashboard", "Inputs"])
 
-if page == "Dashboard":
+if page == "Open Bids Dashboard":
     st.title("Open Bids Dashboard")
     results = load_results()
     if results.empty:
@@ -322,26 +414,131 @@ if page == "Dashboard":
         view = view.copy()
         if "Article Link" in view.columns:
             view["Article Link"] = view["Article Link"].map(_fix_url)
+        
+        view = reorder_for_dashboard(view)
 
-        st.dataframe(
-            view,
+        # ---- Delete-enabled table (Open Bids / results) ----
+        view_for_edit = view.copy()
+        view_for_edit["__delete__"] = False
+
+        edited = st.data_editor(
+            view_for_edit,
             use_container_width=True,
             height=600,
             column_config={
-                "Article Link": st.column_config.LinkColumn(
-                    "Article Link",
-                    help="Open article in a new tab",
-                    display_text="Click to open"
-                )
-            }
+                "__delete__": st.column_config.CheckboxColumn("Delete?", help="Check to delete this row"),
+                "Article Link": st.column_config.LinkColumn("Article Link", display_text="Click to open"),
+            },
+            disabled=[c for c in view_for_edit.columns if c != "__delete__"],
+            hide_index=True,
         )
 
-        # Download filtered CSV
+        to_delete = edited[edited["__delete__"]].drop(columns="__delete__", errors="ignore")
+        col_del, col_dl = st.columns([1, 3])
+        with col_del:
+            #st.warning("Deleting will permanently remove the selected rows from the database. This cannot be undone.", icon="⚠️")
+            if st.button("Delete selected rows", type="primary"):
+                count = delete_results_rows(to_delete)
+                if count > 0:
+                    load_results.clear()   # refresh cache
+                    st.success(f"Deleted {count} row(s).")
+                    st.rerun()
+                else:
+                    st.info("No rows selected.")
+
+        # Download filtered CSV (without the checkbox column)
         buf = io.StringIO()
         view.to_csv(buf, index=False)
         st.download_button("Download filtered CSV", buf.getvalue(), "project_updates.csv", "text/csv")
 
-elif page == "Open Bids":
+
+elif page == "General Dashboard":
+    st.title("South Florida — General Developments")
+
+    df = load_general()
+    if df.empty:
+        st.info("No results yet. Run general_scraper.py to populate the 'general' table.")
+    else:
+        col1, col2, col3 = st.columns([2,2,3])
+
+        with col1:
+            projects = sorted(df["Project Name"].dropna().astype(str).unique())
+            sel_proj = st.multiselect("Project Name", projects)
+
+        with col2:
+            # quick free-text search across title/summary
+            kw = st.text_input("Search Title/Summary")
+
+        with col3:
+            # scraped date range
+            if df["Scraped Date"].notna().any():
+                min_d = df["Scraped Date"].min().date()
+                max_d = df["Scraped Date"].max().date()
+                d_rng = st.date_input("Scraped Date Range", value=(min_d, max_d))
+            else:
+                d_rng = None
+
+        view = df.copy()
+        if sel_proj:
+            view = view[view["Project Name"].astype(str).isin(sel_proj)]
+        if kw:
+            mask = (
+                view["Article Title"].fillna("").str.contains(kw, case=False, na=False) |
+                view["Article Summary"].fillna("").str.contains(kw, case=False, na=False)
+            )
+            view = view[mask]
+        if isinstance(d_rng, (list, tuple)) and all(d_rng):
+            start = pd.to_datetime(d_rng[0])
+            end   = pd.to_datetime(d_rng[1]) + pd.Timedelta(days=1)
+            view = view[(view["Scraped Date"] >= start) & (view["Scraped Date"] < end)]
+
+        def _fix_url(u):
+            if pd.isna(u) or not str(u).strip(): return ""
+            u = str(u).strip()
+            return u if u.startswith(("http://","https://")) else "https://" + u
+
+        view["Article Link"] = view["Article Link"].map(_fix_url)
+        view = reorder_general(view)
+
+        # ---- Delete-enabled table (General) ----
+        view_for_edit = view.copy()
+        view_for_edit["__delete__"] = False
+
+        edited = st.data_editor(
+            view_for_edit,
+            use_container_width=True,
+            height=600,
+            column_config={
+                "__delete__": st.column_config.CheckboxColumn("Delete?", help="Check to delete this row"),
+                "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
+                "Article Summary": st.column_config.TextColumn(width="large"),
+                "Milestone Mentions": st.column_config.TextColumn(width="large"),
+            },
+            disabled=[c for c in view_for_edit.columns if c != "__delete__"],
+            hide_index=True,
+        )
+
+        to_delete = edited[edited["__delete__"]].drop(columns="__delete__", errors="ignore")
+        col_del, col_dl = st.columns([1, 3])
+        with col_del:
+            #st.warning("Deleting will permanently remove the selected rows from the database. This cannot be undone.", icon="⚠️")
+            if st.button("Delete selected rows", type="primary", key="del_general"):
+                count = delete_general_rows(to_delete)
+                if count > 0:
+                    load_general.clear()   # refresh cache
+                    st.success(f"Deleted {count} row(s).")
+                    st.rerun()
+                else:
+                    st.info("No rows selected.")
+
+        # Download (without the checkbox column)
+        buf = io.StringIO()
+        view.to_csv(buf, index=False)
+        st.download_button("Download filtered CSV", buf.getvalue(), "general_sfl.csv", "text/csv")
+
+
+
+elif page == "Inputs":
     st.title("Open Bids — Inputs")
 
     st.caption("Expected columns (must match exactly):")
