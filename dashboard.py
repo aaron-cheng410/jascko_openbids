@@ -49,8 +49,7 @@ SEED_INPUTS_PATH = os.getenv("SEED_INPUTS_PATH", "")
 # Exactly match the columns from your Excel (order matters)
 EXPECTED_INPUT_COLS = [
     "Bid Name","Bid Category","Stage","Engineer","Bid Owner","Mechanical Contractor",
-    "Bidder Owner","Must-Close","Location","Projected Total","Address","Project Name",
-    "Plan & Specs/ Job Info"
+    "Bidder Owner","Must-Close","Location","Projected Total","Address","Project Name"
 ]
 
 ARTICLE_COLS = [
