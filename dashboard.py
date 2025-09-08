@@ -158,6 +158,16 @@ def consolidate_by_bid_name(df: pd.DataFrame, key_col="Bid Name") -> pd.DataFram
           .reset_index(drop=True)
     )
 
+def filter_required_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only rows with non-empty Project Name AND Address (whitespace counts as empty)."""
+    df = df.copy()
+    for col in ["Project Name", "Address"]:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column: {col}")
+        df[col] = df[col].astype(str).str.strip()
+    keep = (df["Project Name"] != "") & (df["Address"] != "")
+    return df[keep]
+
 
 def quote_ident(col: str) -> str:
     # Double-quote SQL identifiers and escape internal quotes
@@ -311,11 +321,17 @@ def load_results():
     return df
 
 def replace_inputs_from_excel(file) -> int:
-    """Replace entire inputs table with consolidated rows by Bid Name."""
+    """Replace entire inputs table with consolidated rows by Bid Name (dropping blanks in required fields)."""
     try:
         df_up = pd.read_excel(file, dtype=str)
         if list(df_up.columns) != EXPECTED_INPUT_COLS:
             raise ValueError("Column names/order must match the example exactly.")
+
+        # drop rows with missing Project Name / Address
+        before = len(df_up)
+        df_up = filter_required_rows(df_up)
+        after_keep = len(df_up)
+        dropped = before - after_keep
 
         # consolidate to one row per Bid Name
         clean = consolidate_by_bid_name(df_up)
@@ -325,6 +341,9 @@ def replace_inputs_from_excel(file) -> int:
         clean.to_sql("inputs", con=engine, if_exists="append", index=False, method="multi")
 
         load_inputs.clear()  # bust cache
+
+        if dropped > 0:
+            st.info(f"Dropped {dropped} row(s) with blank Project Name and/or Address.")
         return len(clean)
     except Exception as e:
         st.error(f"Upload failed: {e}")
@@ -563,13 +582,17 @@ elif page == "Inputs":
     if up:
         try:
             preview = pd.read_excel(up, dtype=str)
-            
 
             if list(preview.columns) == EXPECTED_INPUT_COLS:
-                after = consolidate_by_bid_name(preview)
-                st.write(f"Preview (Number of open bids: {len(after)}):")
+                filtered = filter_required_rows(preview)
+                after = consolidate_by_bid_name(filtered)
+
+                dropped = len(preview) - len(filtered)
+                st.write(f"Preview (Number of open bids after consolidation: {len(after)})")
+                if dropped > 0:
+                    st.info(f"Dropped {dropped} row(s) with blank Project Name and/or Address before consolidation.")
+
                 st.dataframe(after.head(10), use_container_width=True)
-           
             else:
                 st.info("Fix column headers to match exactly before consolidation.")
         except Exception as e:
