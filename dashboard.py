@@ -278,7 +278,7 @@ def ensure_general_table():
 @st.cache_data(ttl=60)
 def load_general():
     cols = [
-        "Project Name","Architect","Possible Engineer","Article Title","Article Date","Scraped Date",
+        "Project Name","Architect","Possible Engineer","Location","Article Title","Article Date","Scraped Date",
         "Article Link","Article Summary","Milestone Mentions"
     ]
     q = f"SELECT {', '.join(quote_ident(c) for c in cols)} FROM general ORDER BY {quote_ident('Scraped Date')} DESC"
