@@ -269,7 +269,7 @@ def ensure_general_table():
     if not insp.has_table("general"):
         # created by scraper, but guard for local dev
         cols_sql = ", ".join(f'{quote_ident(c)} TEXT' for c in [
-            "Project Name","Architect","Possible Engineer","Article Title","Article Date","Scraped Date",
+            "Project Name","Architect","Possible Engineer","Location","Article Title","Article Date","Scraped Date",
             "Article Link","Article Summary","Milestone Mentions"
         ])
         with engine.begin() as conn:
