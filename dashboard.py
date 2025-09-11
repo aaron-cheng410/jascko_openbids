@@ -516,6 +516,16 @@ elif page == "General Dashboard":
         view["Article Link"] = view["Article Link"].map(_fix_url)
         view = reorder_general(view)
 
+        display_order = [
+            "Project Name","Architect","Possible Engineer","Location",
+            "Article Title","Article Date","Scraped Date",
+            "Article Link","Article Summary","Milestone Mentions",
+        ]
+        view = view.reindex(
+            columns=[c for c in display_order if c in view.columns] +
+                    [c for c in view.columns if c not in display_order]
+        )
+
         # ---- Delete-enabled table (General) ----
         view_for_edit = view.copy()
         view_for_edit["__delete__"] = False
