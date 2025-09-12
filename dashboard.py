@@ -482,8 +482,9 @@ elif page == "General Dashboard":
             sel_proj = st.multiselect("Project Name", projects)
 
         with col2:
-            # quick free-text search across title/summary
-            kw = st.text_input("Search Title/Summary")
+            
+            loc_choices = tokens_for_filter(df.get("Location", pd.Series()))
+            sel_loc = st.multiselect("Location", loc_choices)
 
         with col3:
             # scraped date range
@@ -497,12 +498,13 @@ elif page == "General Dashboard":
         view = df.copy()
         if sel_proj:
             view = view[view["Project Name"].astype(str).isin(sel_proj)]
-        if kw:
-            mask = (
-                view["Article Title"].fillna("").str.contains(kw, case=False, na=False) |
-                view["Article Summary"].fillna("").str.contains(kw, case=False, na=False)
-            )
-            view = view[mask]
+        if sel_loc:
+            exploded_loc = view.assign(
+                _loc=view["Location"].fillna("").astype(str).str.split(SPLIT_PATTERN, regex=True)
+            ).explode("_loc")
+            exploded_loc["_loc"] = exploded_loc["_loc"].str.strip()
+            exploded_loc = exploded_loc[exploded_loc["_loc"].isin(sel_loc)]
+            view = exploded_loc.drop(columns="_loc").drop_duplicates()
         if isinstance(d_rng, (list, tuple)) and all(d_rng):
             start = pd.to_datetime(d_rng[0])
             end   = pd.to_datetime(d_rng[1]) + pd.Timedelta(days=1)
