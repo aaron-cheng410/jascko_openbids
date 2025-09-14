@@ -53,7 +53,7 @@ EXPECTED_INPUT_COLS = [
 ]
 
 ARTICLE_COLS = [
-    "Article Title", "Article Date", "Scraped Date", "Article Link",
+    "Article Title", "Article Date", "Groundbreaking Year", "Completion Year", "Scraped Date", "Article Link",
     "Article Summary", "Milestone Mentions"
 ]
 
@@ -64,37 +64,230 @@ ARTICLE_COLS = [
 JOIN_DELIM = " + "
 SPLIT_PATTERN = r"\s*\+\s*"   # split ONLY on ';' or '+' (never commas)
 
-def delete_results_rows(rows_df: pd.DataFrame):
-    """Delete rows from `results` using a stable key."""
+# ---------- ARCHIVE TABLES & HELPERS ----------
+
+
+
+from sqlalchemy import MetaData, Table
+
+def _common_cols(src: str, dst: str) -> list[str]:
+    src_cols = get_table_columns(src) or []
+    dst_cols = get_table_columns(dst) or []
+    return [c for c in src_cols if c in dst_cols]
+
+def _move_rows_oneway(src: str, dst: str, key_cols: list[str], rows_df: pd.DataFrame) -> int:
+    """
+    Move selected rows from `src` -> `dst` using key_cols.
+    - INSERT ... SELECT ... WHERE keys match
+    - AND NOT EXISTS in dst (prevents dupes)
+    - then DELETE from src
+    Works on Postgres and SQLite (no ON CONFLICT).
+    """
+    if rows_df.empty:
+        return 0
+
+    cols = _common_cols(src, dst)
+    if not cols:
+        return 0
+
+    # Build key predicate with stable bind names (no spaces/hyphens)
+    key_pred_src_alias = " AND ".join([f'a.{quote_ident(k)} = :k{i}' for i, k in enumerate(key_cols)])
+    key_pred_src_table = " AND ".join([f'{quote_ident(k)} = :k{i}' for i, k in enumerate(key_cols)])
+    not_exists_join = " AND ".join([f'r.{quote_ident(k)} = a.{quote_ident(k)}' for k in key_cols])
+
+    insert_sql = text(f"""
+        INSERT INTO {dst} ({", ".join(quote_ident(c) for c in cols)})
+        SELECT {", ".join("a." + quote_ident(c) for c in cols)}
+        FROM {src} AS a
+        WHERE {key_pred_src_alias}
+          AND NOT EXISTS (
+                SELECT 1 FROM {dst} AS r
+                WHERE {not_exists_join}
+          )
+    """)
+    delete_sql = text(f"""
+        DELETE FROM {src}
+        WHERE {key_pred_src_table}
+    """)
+
+    moved = 0
+    with engine.begin() as conn:
+        for _, r in rows_df.iterrows():
+            binds = {f'k{i}': (None if pd.isna(r.get(k)) else str(r.get(k))) for i, k in enumerate(key_cols)}
+            conn.execute(insert_sql, binds)
+            conn.execute(delete_sql,  binds)
+            moved += 1
+    return moved
+
+# Keys you already use elsewhere for stable identity
+RESULTS_KEYS = ["Project Name", "Address", "Article Link"]
+GENERAL_KEYS = ["Project Name", "Article Link"]
+
+def archive_results(rows_df: pd.DataFrame) -> int:
+    return _move_rows_oneway("results", "archived_results", RESULTS_KEYS, rows_df)
+
+def restore_results(rows_df: pd.DataFrame) -> int:
+    return _move_rows_oneway("archived_results", "results", RESULTS_KEYS, rows_df)
+
+def archive_general(rows_df: pd.DataFrame) -> int:
+    return _move_rows_oneway("general", "archived_general", GENERAL_KEYS, rows_df)
+
+def restore_general(rows_df: pd.DataFrame) -> int:
+    return _move_rows_oneway("archived_general", "general", GENERAL_KEYS, rows_df)
+
+
+def _insert_rows_sql(table: str, df: pd.DataFrame) -> int:
+    """Append df rows into `table` using SQLAlchemy Core insert."""
+    if df.empty:
+        return 0
+
+    meta = MetaData()
+    tbl = Table(table, meta, autoload_with=engine)
+
+    # Only send columns that exist in the destination table
+    dest_cols = [c.name for c in tbl.columns if c.name in df.columns]
+    if not dest_cols:
+        return 0
+
+    # Convert NaNs/empty strings to None so DB accepts them as NULL
+    records = (
+        df[dest_cols]
+        .applymap(lambda v: None if (pd.isna(v) or v == "") else v)
+        .to_dict(orient="records")
+    )
+
+    with engine.begin() as conn:
+        if records:
+            conn.execute(tbl.insert(), records)
+    return len(records)
+
+
+def ensure_archived_tables():
+    insp = inspect(engine)
+
+    def make_like(source_table: str, archive_table: str):
+        if insp.has_table(archive_table):
+            return
+        src_cols = get_table_columns(source_table) or []
+        if src_cols:
+            cols_sql = ", ".join(f'{quote_ident(c)} TEXT' for c in src_cols)
+            ddl = f"CREATE TABLE {archive_table} ({cols_sql}, archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        else:
+            # Minimal shape; will still accept inserts that only include existing columns
+            ddl = f"CREATE TABLE {archive_table} (archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+
+    make_like("results", "archived_results")
+    make_like("general", "archived_general")
+
+
+
+def _safe_insert_df(df: pd.DataFrame, table: str):
+    """Insert df into table, selecting only columns that exist in dest."""
+    if df.empty:
+        return 0
+    dest_cols = get_table_columns(table) or list(df.columns)
+    subset = [c for c in df.columns if c in dest_cols]
+    if not subset:
+        return 0
+    df[subset].to_sql(table, con=engine, if_exists="append", index=False, method="multi")
+    return len(df)
+
+
+# ---- Archive from MAIN -> ARCHIVE ----
+def archive_results_rows(rows_df: pd.DataFrame):
+    """Move rows from results -> archived_results (by Project Name, Address, Article Link)."""
+    if rows_df.empty:
+        return 0
+    moved = 0
+    with engine.begin() as conn:
+        # Insert first
+        moved += _safe_insert_df(rows_df.copy(), "archived_results")
+        # Then delete from main
+        for _, r in rows_df.iterrows():
+            conn.execute(
+                text('DELETE FROM results WHERE "Project Name"=:pn AND "Address"=:addr AND "Article Link"=:al'),
+                {"pn": str(r.get("Project Name","")), "addr": str(r.get("Address","")), "al": str(r.get("Article Link",""))}
+            )
+    return moved
+
+def archive_general_rows(rows_df: pd.DataFrame):
+    """Move rows from general -> archived_general (by Project Name, Article Link)."""
+    if rows_df.empty:
+        return 0
+    moved = 0
+    with engine.begin() as conn:
+        moved += _safe_insert_df(rows_df.copy(), "archived_general")
+        for _, r in rows_df.iterrows():
+            conn.execute(
+                text('DELETE FROM general WHERE "Project Name"=:pn AND "Article Link"=:al'),
+                {"pn": str(r.get("Project Name","")), "al": str(r.get("Article Link",""))}
+            )
+    return moved
+
+
+# ---- Permanently delete FROM ARCHIVE ----
+def delete_archived_results_rows(rows_df: pd.DataFrame):
     if rows_df.empty:
         return 0
     n = 0
     with engine.begin() as conn:
         for _, r in rows_df.iterrows():
             conn.execute(
-                text('DELETE FROM results WHERE "Project Name"=:pn AND "Address"=:addr AND "Article Link"=:al'),
-                {
-                    "pn": str(r.get("Project Name", "")),
-                    "addr": str(r.get("Address", "")),
-                    "al": str(r.get("Article Link", "")),
-                },
+                text('DELETE FROM archived_results WHERE "Project Name"=:pn AND "Address"=:addr AND "Article Link"=:al'),
+                {"pn": str(r.get("Project Name","")), "addr": str(r.get("Address","")), "al": str(r.get("Article Link",""))}
             )
             n += 1
     return n
 
-def delete_general_rows(rows_df: pd.DataFrame):
-    """Delete rows from `general` using a stable key."""
+def delete_archived_general_rows(rows_df: pd.DataFrame):
     if rows_df.empty:
         return 0
     n = 0
     with engine.begin() as conn:
         for _, r in rows_df.iterrows():
             conn.execute(
-                text('DELETE FROM general WHERE "Project Name"=:pn AND "Article Link"=:al'),
-                {"pn": str(r.get("Project Name", "")), "al": str(r.get("Article Link", ""))},
+                text('DELETE FROM archived_general WHERE "Project Name"=:pn AND "Article Link"=:al'),
+                {"pn": str(r.get("Project Name","")), "al": str(r.get("Article Link",""))}
             )
             n += 1
     return n
+
+
+# ---- Restore FROM ARCHIVE -> MAIN ----
+def restore_results_rows(rows_df: pd.DataFrame):
+    """Move rows archived_results -> results (append-only)."""
+    if rows_df.empty:
+        return 0
+    moved = 0
+    with engine.begin() as conn:
+        # 1) Append to main
+        moved += _insert_rows_sql("results", rows_df.copy())
+
+        # 2) Remove from archive
+        for _, r in rows_df.iterrows():
+            conn.execute(
+                text('DELETE FROM archived_results WHERE "Project Name"=:pn AND "Address"=:addr AND "Article Link"=:al'),
+                {"pn": str(r.get("Project Name","")), "addr": str(r.get("Address","")), "al": str(r.get("Article Link",""))}
+            )
+    return moved
+
+
+def restore_general_rows(rows_df: pd.DataFrame):
+    """Move rows archived_general -> general (append-only)."""
+    if rows_df.empty:
+        return 0
+    moved = 0
+    with engine.begin() as conn:
+        moved += _insert_rows_sql("general", rows_df.copy())
+        for _, r in rows_df.iterrows():
+            conn.execute(
+                text('DELETE FROM archived_general WHERE "Project Name"=:pn AND "Article Link"=:al'),
+                {"pn": str(r.get("Project Name","")), "al": str(r.get("Article Link",""))}
+            )
+    return moved
+
 
 def split_for_dedupe(cell):
     if pd.isna(cell):
@@ -180,6 +373,18 @@ def get_table_columns(table: str):
         return None
     cols = [c["name"] for c in insp.get_columns(table)]
     return cols
+
+# Years helper (place near tokens_for_filter, etc.)
+YEAR_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+
+def years_for_filter(series: pd.Series) -> list[str]:
+    """Collect distinct 4-digit years from a column that may contain text."""
+    yrs = set()
+    for cell in series.dropna().astype(str):
+        yrs.update(YEAR_RE.findall(cell))
+    # return sorted newest->oldest; change to sorted(yrs) if you prefer asc
+    return sorted(yrs, key=lambda x: int(x), reverse=True)
+
 
 def tokens_for_filter(series: pd.Series):
     tokens = set()
@@ -297,6 +502,7 @@ def reorder_general(df: pd.DataFrame) -> pd.DataFrame:
 
 # Bootstrap/migrate schema every start
 ensure_general_table()
+ensure_archived_tables()
 ensure_inputs_table(EXPECTED_INPUT_COLS)
 ensure_results_table(EXPECTED_INPUT_COLS)
 seed_inputs_if_empty()
@@ -307,6 +513,26 @@ seed_inputs_if_empty()
 @st.cache_data(ttl=60)
 def load_inputs():
     return pd.read_sql('SELECT * FROM inputs ORDER BY "created_at" DESC', engine)
+
+@st.cache_data(ttl=60)
+def load_archived_results():
+    # Try to select same columns as 'results' to keep UI consistent
+    cols = get_table_columns("archived_results") or []
+    if not cols:
+        return pd.DataFrame()
+    q = f'SELECT {", ".join(quote_ident(c) for c in cols)} FROM archived_results ORDER BY {quote_ident("archived_at")} DESC NULLS LAST'
+    return pd.read_sql(q, engine)
+
+@st.cache_data(ttl=60)
+def load_archived_general():
+    cols = get_table_columns("archived_general") or []
+    if not cols:
+        return pd.DataFrame()
+    # archived_at may exist last; handle gracefully
+    order_col = "archived_at" if "archived_at" in cols else cols[0]
+    q = f'SELECT {", ".join(quote_ident(c) for c in cols)} FROM archived_general ORDER BY {quote_ident(order_col)} DESC NULLS LAST'
+    return pd.read_sql(q, engine)
+
 
 @st.cache_data(ttl=60)
 def load_results():
@@ -352,7 +578,8 @@ def replace_inputs_from_excel(file) -> int:
 # UI
 # ----------------------------
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Open Bids Dashboard", "General Dashboard", "Inputs"])
+page = st.sidebar.radio("Go to", ["Open Bids Dashboard", "General Dashboard", "Inputs", "Archived"])
+
 
 if page == "Open Bids Dashboard":
     st.title("Open Bids Dashboard")
@@ -363,6 +590,8 @@ if page == "Open Bids Dashboard":
         # Optional filters: if "Project Name" exists
         row1a, row1b = st.columns([2, 2])
         row2a, row2b = st.columns([2, 3])
+        row3a, row3b = st.columns([2, 2])
+
 
         with row1a:
             projects = sorted(results.get("Project Name", pd.Series()).dropna().astype(str).unique())
@@ -375,6 +604,8 @@ if page == "Open Bids Dashboard":
         with row2a:
             bidder_owner_choices = tokens_for_filter(results.get("Bidder Owner", pd.Series()))
             sel_bidder_owner = st.multiselect("Bidder Owner", bidder_owner_choices)
+        
+      
 
         def _parse_range(val):
             """Return (start, end) where each is a date or None, regardless of what Streamlit returns."""
@@ -398,6 +629,14 @@ if page == "Open Bids Dashboard":
                 )
             else:
                 scr_range = None
+        
+        with row3a:
+            gb_choices = years_for_filter(results.get("Groundbreaking Year", pd.Series()))
+            sel_gb_years = st.multiselect("Groundbreaking Year", gb_choices)
+
+        with row3b:
+            comp_choices = years_for_filter(results.get("Completion Year", pd.Series()))
+            sel_comp_years = st.multiselect("Completion Year", comp_choices)
 
         view = results.copy()
         if sel_projects:
@@ -412,6 +651,16 @@ if page == "Open Bids Dashboard":
             exploded = exploded[exploded["_token"].isin(sel_bidder_owner)]
             view = exploded.drop(columns="_token").drop_duplicates()
         start_d, end_d = _parse_range(scr_range)
+
+        if sel_gb_years:
+            gb_col = view.get("Groundbreaking Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
+            mask_gb = gb_col.apply(lambda s: bool(set(sel_gb_years) & set(YEAR_RE.findall(s))))
+            view = view[mask_gb]
+
+        if sel_comp_years:
+            comp_col = view.get("Completion Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
+            mask_comp = comp_col.apply(lambda s: bool(set(sel_comp_years) & set(YEAR_RE.findall(s))))
+            view = view[mask_comp]
 
         if start_d and end_d:
             start = pd.to_datetime(start_d)
@@ -433,34 +682,52 @@ if page == "Open Bids Dashboard":
         
         view = reorder_for_dashboard(view)
 
-        # ---- Delete-enabled table (Open Bids / results) ----
+        import numpy as np
+
+        THIS_YEAR = pd.Timestamp.today().year  # e.g., 2025
+        gb_ser = view.get("Groundbreaking Year")
+        gb_mask = gb_ser.astype(str).str.contains(fr"\b{THIS_YEAR}\b", na=False) if gb_ser is not None else pd.Series(False, index=view.index)
+
         view_for_edit = view.copy()
-        view_for_edit["__delete__"] = False
+        view_for_edit["__archive__"] = False
+        view_for_edit["⭐ Groundbreaking This Year"] = np.where(gb_mask, "⭐", "")
+
+        # Bring the flag + archive checkbox to the front
+        lead_cols = ["__archive__", "⭐ Groundbreaking This Year"]
+        view_for_edit = view_for_edit.reindex(columns=lead_cols + [c for c in view_for_edit.columns if c not in lead_cols])
 
         edited = st.data_editor(
             view_for_edit,
             use_container_width=True,
             height=600,
             column_config={
-                "__delete__": st.column_config.CheckboxColumn("Delete?", help="Check to delete this row"),
+                "__archive__": st.column_config.CheckboxColumn("Archive?", help="Move this row to Archive"),
+                "⭐ Groundbreaking This Year": st.column_config.TextColumn(
+                    "⭐ Groundbreaking This Year",
+                    help=f"Groundbreaking Year == {THIS_YEAR}"
+                ),
                 "Article Link": st.column_config.LinkColumn("Article Link", display_text="Click to open"),
             },
-            disabled=[c for c in view_for_edit.columns if c != "__delete__"],
+            disabled=[c for c in view_for_edit.columns if c != "__archive__"],
             hide_index=True,
         )
 
-        to_delete = edited[edited["__delete__"]].drop(columns="__delete__", errors="ignore")
-        col_del, col_dl = st.columns([1, 3])
+        # <-- Build the selection for archiving
+        to_archive_df = edited[edited["__archive__"]].drop(columns="__archive__", errors="ignore")
+
+        col_del, _ = st.columns([1, 3])
         with col_del:
-            #st.warning("Deleting will permanently remove the selected rows from the database. This cannot be undone.", icon="⚠️")
-            if st.button("Delete selected rows", type="primary"):
-                count = delete_results_rows(to_delete)
+            if st.button("Archive selected rows", type="primary"):
+                count = archive_results_rows(to_archive_df)
                 if count > 0:
-                    load_results.clear()   # refresh cache
-                    st.success(f"Deleted {count} row(s).")
+                    load_results.clear()
+                    load_archived_results.clear()
+                    st.success(f"Archived {count} row(s).")
                     st.rerun()
                 else:
                     st.info("No rows selected.")
+
+
 
         # Download filtered CSV (without the checkbox column)
         buf = io.StringIO()
@@ -493,6 +760,17 @@ elif page == "General Dashboard":
                 d_rng = st.date_input("Scraped Date Range", value=(min_d, max_d))
             else:
                 d_rng = None
+        
+        rowY1, rowY2 = st.columns([2, 2])
+
+        with rowY1:
+            gb_choices_g = years_for_filter(df.get("Groundbreaking Year", pd.Series()))
+            sel_gb_years_g = st.multiselect("Groundbreaking Year", gb_choices_g, key="gb_years_general")
+
+        with rowY2:
+            comp_choices_g = years_for_filter(df.get("Completion Year", pd.Series()))
+            sel_comp_years_g = st.multiselect("Completion Year", comp_choices_g, key="comp_years_general")
+
 
         view = df.copy()
         if sel_proj:
@@ -507,6 +785,18 @@ elif page == "General Dashboard":
             start = pd.to_datetime(d_rng[0])
             end   = pd.to_datetime(d_rng[1]) + pd.Timedelta(days=1)
             view = view[(view["Scraped Date"] >= start) & (view["Scraped Date"] < end)]
+        
+        # Year filters (General)
+        if sel_gb_years_g:
+            gb_col = view.get("Groundbreaking Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
+            mask_gb = gb_col.apply(lambda s: bool(set(sel_gb_years_g) & set(YEAR_RE.findall(s))))
+            view = view[mask_gb]
+
+        if sel_comp_years_g:
+            comp_col = view.get("Completion Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
+            mask_comp = comp_col.apply(lambda s: bool(set(sel_comp_years_g) & set(YEAR_RE.findall(s))))
+            view = view[mask_comp]
+
 
         def _fix_url(u):
             if pd.isna(u) or not str(u).strip(): return ""
@@ -530,21 +820,15 @@ elif page == "General Dashboard":
         # ---- Delete-enabled table (General) ----
         import numpy as np
 
-        THIS_YEAR = pd.Timestamp.today().year  # or set THIS_YEAR = 2025
-
-        # Safe mask even if the column is missing or has NaNs
+        THIS_YEAR = pd.Timestamp.today().year
         gb_ser = view.get("Groundbreaking Year")
-        if gb_ser is not None:
-            gb_mask = gb_ser.astype(str).str.contains(fr"\b{THIS_YEAR}\b", na=False)
-        else:
-            gb_mask = pd.Series(False, index=view.index)
+        gb_mask = gb_ser.astype(str).str.contains(fr"\b{THIS_YEAR}\b", na=False) if gb_ser is not None else pd.Series(False, index=view.index)
 
         view_for_edit = view.copy()
-        view_for_edit["__delete__"] = False
+        view_for_edit["__archive__"] = False
         view_for_edit["⭐ Groundbreaking This Year"] = np.where(gb_mask, "⭐", "")
 
-        # Optional: bring the flag and delete columns to the front
-        lead_cols = ["__delete__", "⭐ Groundbreaking This Year"]
+        lead_cols = ["__archive__", "⭐ Groundbreaking This Year"]
         view_for_edit = view_for_edit.reindex(
             columns=lead_cols + [c for c in view_for_edit.columns if c not in lead_cols]
         )
@@ -554,7 +838,7 @@ elif page == "General Dashboard":
             use_container_width=True,
             height=600,
             column_config={
-                "__delete__": st.column_config.CheckboxColumn("Delete?", help="Check to delete this row"),
+                "__archive__": st.column_config.CheckboxColumn("Archive?", help="Move this row to Archive"),
                 "⭐ Groundbreaking This Year": st.column_config.TextColumn(
                     "⭐ Groundbreaking This Year", help=f"Groundbreaking Year == {THIS_YEAR}"
                 ),
@@ -562,23 +846,25 @@ elif page == "General Dashboard":
                 "Article Summary": st.column_config.TextColumn(width="large"),
                 "Milestone Mentions": st.column_config.TextColumn(width="large"),
             },
-            disabled=[c for c in view_for_edit.columns if c != "__delete__"],
+            disabled=[c for c in view_for_edit.columns if c != "__archive__"],
             hide_index=True,
         )
 
+        to_archive_df = edited[edited["__archive__"]].drop(columns="__archive__", errors="ignore")
 
-        to_delete = edited[edited["__delete__"]].drop(columns="__delete__", errors="ignore")
-        col_del, col_dl = st.columns([1, 3])
+        col_del, _ = st.columns([1, 3])
         with col_del:
-            #st.warning("Deleting will permanently remove the selected rows from the database. This cannot be undone.", icon="⚠️")
-            if st.button("Delete selected rows", type="primary", key="del_general"):
-                count = delete_general_rows(to_delete)
+            if st.button("Archive selected rows", type="primary", key="archive_general"):
+                count = archive_general_rows(to_archive_df)
                 if count > 0:
-                    load_general.clear()   # refresh cache
-                    st.success(f"Deleted {count} row(s).")
+                    load_general.clear()
+                    load_archived_general.clear()
+                    st.success(f"Archived {count} row(s).")
                     st.rerun()
                 else:
                     st.info("No rows selected.")
+
+
 
         # Download (without the checkbox column)
         buf = io.StringIO()
@@ -636,3 +922,119 @@ elif page == "Inputs":
                     st.rerun()
 
     st.info("This action replaces **all** rows in `inputs` with the uploaded file.")
+
+elif page == "Archived":
+    st.title("Archived Items")
+
+    # ---- Archived Open Bids (results) ----
+    st.subheader("Archived — Open Bids")
+    arch_res = load_archived_results()
+    if arch_res.empty:
+        st.info("No archived Open Bids rows.")
+    else:
+        view_res = arch_res.copy()
+        # Make links clickable if present
+        if "Article Link" in view_res.columns:
+            def _fix_url(u):
+                if pd.isna(u) or not str(u).strip(): return ""
+                u = str(u).strip()
+                return u if u.startswith(("http://","https://")) else "https://" + u
+            view_res["Article Link"] = view_res["Article Link"].map(_fix_url)
+
+        view_res["__restore__"] = False
+        view_res["__delete__"] = False
+
+        edited_res = st.data_editor(
+            view_res,
+            use_container_width=True,
+            height=420,
+            column_config={
+                "__restore__": st.column_config.CheckboxColumn("Restore?"),
+                "__delete__": st.column_config.CheckboxColumn("Delete permanently?"),
+                "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
+            },
+            disabled=[c for c in view_res.columns if c not in ("__restore__", "__delete__")],
+            hide_index=True,
+        )
+
+        sel_restore_res = edited_res[edited_res["__restore__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
+        sel_delete_res  = edited_res[edited_res["__delete__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
+
+        c1, c2 = st.columns([1,1])
+        with c1:
+            if st.button("Restore to Open Bids", type="primary"):
+                n = restore_results_rows(sel_restore_res)
+                if n > 0:
+                    load_results.clear()
+                    load_archived_results.clear()
+                    st.success(f"Restored {n} row(s) to Open Bids.")
+                    st.rerun()
+                else:
+                    st.info("No rows selected to restore.")
+        with c2:
+            if st.button("Delete Selected - Open Bids (permanent)", type="secondary"):
+                n = delete_archived_results_rows(sel_delete_res)
+                if n > 0:
+                    load_archived_results.clear()
+                    st.success(f"Deleted {n} archived row(s).")
+                    st.rerun()
+                else:
+                    st.info("No rows selected to delete.")
+
+    st.divider()
+
+    # ---- Archived General ----
+    st.subheader("Archived — General")
+    arch_gen = load_archived_general()
+    if arch_gen.empty:
+        st.info("No archived General rows.")
+    else:
+        view_gen = arch_gen.copy()
+        if "Article Link" in view_gen.columns:
+            def _fix_url(u):
+                if pd.isna(u) or not str(u).strip(): return ""
+                u = str(u).strip()
+                return u if u.startswith(("http://","https://")) else "https://" + u
+            view_gen["Article Link"] = view_gen["Article Link"].map(_fix_url)
+
+        view_gen["__restore__"] = False
+        view_gen["__delete__"] = False
+
+        edited_gen = st.data_editor(
+            view_gen,
+            use_container_width=True,
+            height=420,
+            column_config={
+                "__restore__": st.column_config.CheckboxColumn("Restore?"),
+                "__delete__": st.column_config.CheckboxColumn("Delete permanently?"),
+                "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
+                "Article Summary": st.column_config.TextColumn(width="large"),
+                "Milestone Mentions": st.column_config.TextColumn(width="large"),
+            },
+            disabled=[c for c in view_gen.columns if c not in ("__restore__", "__delete__")],
+            hide_index=True,
+        )
+
+        sel_restore_gen = edited_gen[edited_gen["__restore__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
+        sel_delete_gen  = edited_gen[edited_gen["__delete__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
+
+        c3, c4 = st.columns([1,1])
+        with c3:
+            if st.button("Restore to General", type="primary"):
+                n = restore_general_rows(sel_restore_gen)
+                if n > 0:
+                    load_general.clear()
+                    load_archived_general.clear()
+                    st.success(f"Restored {n} row(s) to General.")
+                    st.rerun()
+                else:
+                    st.info("No rows selected to restore.")
+        with c4:
+            if st.button("Delete Selected - General (permanent)", type="secondary"):
+                n = delete_archived_general_rows(sel_delete_gen)
+                if n > 0:
+                    load_archived_general.clear()
+                    st.success(f"Deleted {n} archived row(s).")
+                    st.rerun()
+                else:
+                    st.info("No rows selected to delete.")
