@@ -126,14 +126,8 @@ GENERAL_KEYS = ["Project Name", "Article Link"]
 def archive_results(rows_df: pd.DataFrame) -> int:
     return _move_rows_oneway("results", "archived_results", RESULTS_KEYS, rows_df)
 
-def restore_results(rows_df: pd.DataFrame) -> int:
-    return _move_rows_oneway("archived_results", "results", RESULTS_KEYS, rows_df)
-
 def archive_general(rows_df: pd.DataFrame) -> int:
     return _move_rows_oneway("general", "archived_general", GENERAL_KEYS, rows_df)
-
-def restore_general(rows_df: pd.DataFrame) -> int:
-    return _move_rows_oneway("archived_general", "general", GENERAL_KEYS, rows_df)
 
 
 def _insert_rows_sql(table: str, df: pd.DataFrame) -> int:
@@ -254,39 +248,6 @@ def delete_archived_general_rows(rows_df: pd.DataFrame):
             n += 1
     return n
 
-
-# ---- Restore FROM ARCHIVE -> MAIN ----
-def restore_results_rows(rows_df: pd.DataFrame):
-    """Move rows archived_results -> results (append-only)."""
-    if rows_df.empty:
-        return 0
-    moved = 0
-    with engine.begin() as conn:
-        # 1) Append to main
-        moved += _insert_rows_sql("results", rows_df.copy())
-
-        # 2) Remove from archive
-        for _, r in rows_df.iterrows():
-            conn.execute(
-                text('DELETE FROM archived_results WHERE "Project Name"=:pn AND "Address"=:addr AND "Article Link"=:al'),
-                {"pn": str(r.get("Project Name","")), "addr": str(r.get("Address","")), "al": str(r.get("Article Link",""))}
-            )
-    return moved
-
-
-def restore_general_rows(rows_df: pd.DataFrame):
-    """Move rows archived_general -> general (append-only)."""
-    if rows_df.empty:
-        return 0
-    moved = 0
-    with engine.begin() as conn:
-        moved += _insert_rows_sql("general", rows_df.copy())
-        for _, r in rows_df.iterrows():
-            conn.execute(
-                text('DELETE FROM archived_general WHERE "Project Name"=:pn AND "Article Link"=:al'),
-                {"pn": str(r.get("Project Name","")), "al": str(r.get("Article Link",""))}
-            )
-    return moved
 
 
 def split_for_dedupe(cell):
@@ -958,15 +919,17 @@ elif page == "Archived":
         st.info("No archived Open Bids rows.")
     else:
         view_res = arch_res.copy()
+
         # Make links clickable if present
         if "Article Link" in view_res.columns:
             def _fix_url(u):
-                if pd.isna(u) or not str(u).strip(): return ""
+                if pd.isna(u) or not str(u).strip():
+                    return ""
                 u = str(u).strip()
                 return u if u.startswith(("http://","https://")) else "https://" + u
             view_res["Article Link"] = view_res["Article Link"].map(_fix_url)
 
-        view_res["__restore__"] = False
+        # Only allow permanent deletion (no restore)
         view_res["__delete__"] = False
 
         edited_res = st.data_editor(
@@ -974,37 +937,22 @@ elif page == "Archived":
             use_container_width=True,
             height=420,
             column_config={
-                "__restore__": st.column_config.CheckboxColumn("Restore?"),
                 "__delete__": st.column_config.CheckboxColumn("Delete permanently?"),
                 "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
             },
-            disabled=[c for c in view_res.columns if c not in ("__restore__", "__delete__")],
+            disabled=[c for c in view_res.columns if c != "__delete__"],
             hide_index=True,
         )
 
-        sel_restore_res = edited_res[edited_res["__restore__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
-        sel_delete_res  = edited_res[edited_res["__delete__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
+        sel_delete_res = edited_res[edited_res["__delete__"]].drop(columns=["__delete__"], errors="ignore")
 
-        c1, c2 = st.columns([1,1])
-        with c1:
-            if st.button("Restore to Open Bids", type="primary"):
-                n = restore_results_rows(sel_restore_res)
-                if n > 0:
-                    load_results.clear()
-                    load_archived_results.clear()
-                    st.success(f"Restored {n} row(s) to Open Bids.")
-                    st.rerun()
-                else:
-                    st.info("No rows selected to restore.")
-        with c2:
-            if st.button("Delete Selected - Open Bids (permanent)", type="secondary"):
-                n = delete_archived_results_rows(sel_delete_res)
-                if n > 0:
-                    load_archived_results.clear()
-                    st.success(f"Deleted {n} archived row(s).")
-                    st.rerun()
-                else:
-                    st.info("No rows selected to delete.")
+        if st.button("Delete Selected - Open Bids (permanent)", type="secondary"):
+            n = delete_archived_results_rows(sel_delete_res)
+            if n > 0:
+                load_archived_results.clear()
+                st.rerun()
+            else:
+                st.info("No rows selected to delete.")
 
     st.divider()
 
@@ -1015,14 +963,15 @@ elif page == "Archived":
         st.info("No archived General rows.")
     else:
         view_gen = arch_gen.copy()
+
         if "Article Link" in view_gen.columns:
             def _fix_url(u):
-                if pd.isna(u) or not str(u).strip(): return ""
+                if pd.isna(u) or not str(u).strip():
+                    return ""
                 u = str(u).strip()
                 return u if u.startswith(("http://","https://")) else "https://" + u
             view_gen["Article Link"] = view_gen["Article Link"].map(_fix_url)
 
-        view_gen["__restore__"] = False
         view_gen["__delete__"] = False
 
         edited_gen = st.data_editor(
@@ -1030,36 +979,21 @@ elif page == "Archived":
             use_container_width=True,
             height=420,
             column_config={
-                "__restore__": st.column_config.CheckboxColumn("Restore?"),
                 "__delete__": st.column_config.CheckboxColumn("Delete permanently?"),
                 "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
                 "Article Summary": st.column_config.TextColumn(width="large"),
                 "Milestone Mentions": st.column_config.TextColumn(width="large"),
             },
-            disabled=[c for c in view_gen.columns if c not in ("__restore__", "__delete__")],
+            disabled=[c for c in view_gen.columns if c != "__delete__"],
             hide_index=True,
         )
 
-        sel_restore_gen = edited_gen[edited_gen["__restore__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
-        sel_delete_gen  = edited_gen[edited_gen["__delete__"]].drop(columns=["__restore__", "__delete__"], errors="ignore")
+        sel_delete_gen = edited_gen[edited_gen["__delete__"]].drop(columns=["__delete__"], errors="ignore")
 
-        c3, c4 = st.columns([1,1])
-        with c3:
-            if st.button("Restore to General", type="primary"):
-                n = restore_general_rows(sel_restore_gen)
-                if n > 0:
-                    load_general.clear()
-                    load_archived_general.clear()
-                    st.success(f"Restored {n} row(s) to General.")
-                    st.rerun()
-                else:
-                    st.info("No rows selected to restore.")
-        with c4:
-            if st.button("Delete Selected - General (permanent)", type="secondary"):
-                n = delete_archived_general_rows(sel_delete_gen)
-                if n > 0:
-                    load_archived_general.clear()
-                    st.success(f"Deleted {n} archived row(s).")
-                    st.rerun()
-                else:
-                    st.info("No rows selected to delete.")
+        if st.button("Delete Selected - General (permanent)", type="secondary"):
+            n = delete_archived_general_rows(sel_delete_gen)
+            if n > 0:
+                load_archived_general.clear()
+                st.rerun()
+            else:
+                st.info("No rows selected to delete.")
