@@ -46,7 +46,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 # Seed file (your test inputs). In prod, you can clear this env var.
 SEED_INPUTS_PATH = os.getenv("SEED_INPUTS_PATH", "")
 
-# Exactly match the columns from your Excel (order matters)
+
 EXPECTED_INPUT_COLS = [
     "Bid Name","Bid Category","Stage","Engineer","Bid Owner","Mechanical Contractor",
     "Bidder Owner","Must-Close","Location","Projected Total","Address","Project Name"
@@ -269,7 +269,7 @@ def ensure_general_table():
     if not insp.has_table("general"):
         # created by scraper, but guard for local dev
         cols_sql = ", ".join(f'{quote_ident(c)} TEXT' for c in [
-            "Project Name","Architect","Possible Engineer","Location","Article Title","Article Date","Scraped Date",
+            "Project Name","Architect","Possible Engineer","Article Title","Article Date","Scraped Date",
             "Article Link","Article Summary","Milestone Mentions"
         ])
         with engine.begin() as conn:
@@ -278,7 +278,7 @@ def ensure_general_table():
 @st.cache_data(ttl=60)
 def load_general():
     cols = [
-        "Project Name","Architect","Possible Engineer","Location","Article Title","Article Date","Scraped Date",
+        "Project Name","Architect","Possible Engineer","Location","Groundbreaking Year","Completion Year","Article Title","Article Date","Scraped Date",
         "Article Link","Article Summary","Milestone Mentions"
     ]
     q = f"SELECT {', '.join(quote_ident(c) for c in cols)} FROM general ORDER BY {quote_ident('Scraped Date')} DESC"
@@ -289,7 +289,7 @@ def load_general():
 
 def reorder_general(df: pd.DataFrame) -> pd.DataFrame:
     priority = ["Project Name","Architect"] + [
-        "Possible Engineer","Article Title","Article Date","Scraped Date","Article Link","Article Summary","Milestone Mentions"
+        "Possible Engineer","Location","Groundbreaking Year","Completion Year","Article Title","Article Date","Scraped Date","Article Link","Article Summary","Milestone Mentions"
     ]
     order = [c for c in priority if c in df.columns] + [c for c in df.columns if c not in priority]
     return df[order]
@@ -482,9 +482,8 @@ elif page == "General Dashboard":
             sel_proj = st.multiselect("Project Name", projects)
 
         with col2:
-            
-            loc_choices = tokens_for_filter(df.get("Location", pd.Series()))
-            sel_loc = st.multiselect("Location", loc_choices)
+            # quick free-text search across title/summary
+            kw = st.text_input("Search Title/Summary")
 
         with col3:
             # scraped date range
@@ -498,13 +497,12 @@ elif page == "General Dashboard":
         view = df.copy()
         if sel_proj:
             view = view[view["Project Name"].astype(str).isin(sel_proj)]
-        if sel_loc:
-            exploded_loc = view.assign(
-                _loc=view["Location"].fillna("").astype(str).str.split(SPLIT_PATTERN, regex=True)
-            ).explode("_loc")
-            exploded_loc["_loc"] = exploded_loc["_loc"].str.strip()
-            exploded_loc = exploded_loc[exploded_loc["_loc"].isin(sel_loc)]
-            view = exploded_loc.drop(columns="_loc").drop_duplicates()
+        if kw:
+            mask = (
+                view["Article Title"].fillna("").str.contains(kw, case=False, na=False) |
+                view["Article Summary"].fillna("").str.contains(kw, case=False, na=False)
+            )
+            view = view[mask]
         if isinstance(d_rng, (list, tuple)) and all(d_rng):
             start = pd.to_datetime(d_rng[0])
             end   = pd.to_datetime(d_rng[1]) + pd.Timedelta(days=1)
@@ -529,8 +527,27 @@ elif page == "General Dashboard":
         )
 
         # ---- Delete-enabled table (General) ----
+        # ---- Delete-enabled table (General) ----
+        import numpy as np
+
+        THIS_YEAR = pd.Timestamp.today().year  # or set THIS_YEAR = 2025
+
+        # Safe mask even if the column is missing or has NaNs
+        gb_ser = view.get("Groundbreaking Year")
+        if gb_ser is not None:
+            gb_mask = gb_ser.astype(str).str.contains(fr"\b{THIS_YEAR}\b", na=False)
+        else:
+            gb_mask = pd.Series(False, index=view.index)
+
         view_for_edit = view.copy()
         view_for_edit["__delete__"] = False
+        view_for_edit["⭐ Groundbreaking This Year"] = np.where(gb_mask, "⭐", "")
+
+        # Optional: bring the flag and delete columns to the front
+        lead_cols = ["__delete__", "⭐ Groundbreaking This Year"]
+        view_for_edit = view_for_edit.reindex(
+            columns=lead_cols + [c for c in view_for_edit.columns if c not in lead_cols]
+        )
 
         edited = st.data_editor(
             view_for_edit,
@@ -538,6 +555,9 @@ elif page == "General Dashboard":
             height=600,
             column_config={
                 "__delete__": st.column_config.CheckboxColumn("Delete?", help="Check to delete this row"),
+                "⭐ Groundbreaking This Year": st.column_config.TextColumn(
+                    "⭐ Groundbreaking This Year", help=f"Groundbreaking Year == {THIS_YEAR}"
+                ),
                 "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
                 "Article Summary": st.column_config.TextColumn(width="large"),
                 "Milestone Mentions": st.column_config.TextColumn(width="large"),
@@ -545,6 +565,7 @@ elif page == "General Dashboard":
             disabled=[c for c in view_for_edit.columns if c != "__delete__"],
             hide_index=True,
         )
+
 
         to_delete = edited[edited["__delete__"]].drop(columns="__delete__", errors="ignore")
         col_del, col_dl = st.columns([1, 3])
