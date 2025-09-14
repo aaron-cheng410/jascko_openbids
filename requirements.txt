@@ -4,3 +4,4 @@ SQLAlchemy>=2
 psycopg2-binary
 openpyxl
 serpapi
+numpy
