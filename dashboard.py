@@ -413,31 +413,34 @@ def recreate_inputs_table(expected_cols):
             conn.execute(text(idx))
 
 def ensure_results_table(expected_input_cols):
-    # results = all input cols + article fields
+    """
+    Additive migration for `results`:
+    - Create if missing
+    - ADD any missing columns
+    - Never drop/recreate in prod
+    """
     desired_cols = expected_input_cols + ARTICLE_COLS
     existing = get_table_columns("results")
 
+    def q(name: str) -> str:
+        return '"' + name.replace('"','""') + '"'
+
     if existing is None:
-        # Create results fresh
         with engine.begin() as conn:
-            cols_sql = ",\n".join(f"{quote_ident(c)} TEXT" for c in desired_cols)
+            cols_sql = ",\n".join(f"{q(c)} TEXT" for c in desired_cols)
             ddl = f"CREATE TABLE results ({cols_sql})"
             conn.execute(text(ddl))
-            # Index on scraped_date for ordering
-            conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_results_scraped ON results({quote_ident('Scraped Date')})"))
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_results_scraped ON results({q('Scraped Date')})"))
         return
 
-    # If columns mismatch, recreate (simple, predictable)
-    existing_set = set(existing)
-    desired_set = set(desired_cols)
-    if existing_set != desired_set or len(existing) != len(desired_cols):
-        with engine.begin() as conn:
-            conn.exec_driver_sql("DROP TABLE IF EXISTS results;")
-        with engine.begin() as conn:
-            cols_sql = ",\n".join(f"{quote_ident(c)} TEXT" for c in desired_cols)
-            ddl = f"CREATE TABLE results ({cols_sql})"
-            conn.execute(text(ddl))
-            conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_results_scraped ON results({quote_ident('Scraped Date')})"))
+    # ADD any missing columns; do NOT drop if there are extras or order differs
+    # to_add = [c for c in desired_cols if c not in existing]
+    # if to_add:
+    #     with engine.begin() as conn:
+    #         for c in to_add:
+    #             conn.execute(text(f"ALTER TABLE results ADD COLUMN {q(c)} TEXT"))
+    #         conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_results_scraped ON results({q('Scraped Date')})"))
+
 
 def ensure_inputs_table(expected_cols):
     existing = get_table_columns("inputs")
@@ -470,15 +473,39 @@ def seed_inputs_if_empty():
         st.error(f"Failed to seed inputs: {e}")
 
 def ensure_general_table():
-    insp = inspect(engine)
-    if not insp.has_table("general"):
-        # created by scraper, but guard for local dev
-        cols_sql = ", ".join(f'{quote_ident(c)} TEXT' for c in [
-            "Project Name","Architect","Possible Engineer","Article Title","Article Date","Scraped Date",
-            "Article Link","Article Summary","Milestone Mentions"
-        ])
+    """
+    Additive migration for `general`:
+    - Create if missing
+    - ADD any missing columns
+    - Never drop/recreate
+    """
+    desired_cols = [
+        "Project Name", "Architect", "Possible Engineer",
+        "Location", "Groundbreaking Year", "Completion Year",
+        "Article Title", "Article Date", "Scraped Date",
+        "Article Link", "Article Summary", "Milestone Mentions",
+    ]
+
+    existing = get_table_columns("general")
+
+    def q(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
+    if existing is None:
         with engine.begin() as conn:
+            cols_sql = ", ".join(f"{q(c)} TEXT" for c in desired_cols)
             conn.execute(text(f"CREATE TABLE general ({cols_sql})"))
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_scraped ON general({q('Scraped Date')})"))
+        return
+
+    # # Add any missing columns; do NOT drop if extras/order differ
+    # to_add = [c for c in desired_cols if c not in existing]
+    # if to_add:
+    #     with engine.begin() as conn:
+    #         for c in to_add:
+    #             conn.execute(text(f"ALTER TABLE general ADD COLUMN {q(c)} TEXT"))
+    #         conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_scraped ON general({q('Scraped Date')})"))
+
 
 @st.cache_data(ttl=60)
 def load_general():
@@ -502,9 +529,9 @@ def reorder_general(df: pd.DataFrame) -> pd.DataFrame:
 
 # Bootstrap/migrate schema every start
 ensure_general_table()
-ensure_archived_tables()
 ensure_inputs_table(EXPECTED_INPUT_COLS)
 ensure_results_table(EXPECTED_INPUT_COLS)
+ensure_archived_tables()
 seed_inputs_if_empty()
 
 # ----------------------------
@@ -722,7 +749,6 @@ if page == "Open Bids Dashboard":
                 if count > 0:
                     load_results.clear()
                     load_archived_results.clear()
-                    st.success(f"Archived {count} row(s).")
                     st.rerun()
                 else:
                     st.info("No rows selected.")
@@ -859,7 +885,6 @@ elif page == "General Dashboard":
                 if count > 0:
                     load_general.clear()
                     load_archived_general.clear()
-                    st.success(f"Archived {count} row(s).")
                     st.rerun()
                 else:
                     st.info("No rows selected.")
