@@ -70,7 +70,7 @@ SPLIT_PATTERN = r"\s*\+\s*"   # split ONLY on ';' or '+' (never commas)
 # ---------- ARCHIVE TABLES & HELPERS ----------
 
 # ========= Chatbot helpers (single-table, safe SQL) =========
-client = OpenAI(st.secrets["openai_api_key"]) # needs OPENAI_API_KEY in env or st.secrets
+client = OpenAI(api_key=st.secrets["openai_api_key"]) # needs OPENAI_API_KEY in env or st.secrets
 
 def get_table_schema_text(table_name: str) -> str:
     """Return a compact schema string for a single allowed table."""
