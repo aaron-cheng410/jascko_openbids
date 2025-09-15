@@ -47,6 +47,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 SEED_INPUTS_PATH = os.getenv("SEED_INPUTS_PATH", "")
 
 
+# Exactly match the columns from your Excel (order matters)
 EXPECTED_INPUT_COLS = [
     "Bid Name","Bid Category","Stage","Engineer","Bid Owner","Mechanical Contractor",
     "Bidder Owner","Must-Close","Location","Projected Total","Address","Project Name"
@@ -65,6 +66,180 @@ JOIN_DELIM = " + "
 SPLIT_PATTERN = r"\s*\+\s*"   # split ONLY on ';' or '+' (never commas)
 
 # ---------- ARCHIVE TABLES & HELPERS ----------
+
+# ========= Chatbot helpers (single-table, safe SQL) =========
+client = OpenAI(st.secrets["openai_api_key"]) # needs OPENAI_API_KEY in env or st.secrets
+
+def get_table_schema_text(table_name: str) -> str:
+    """Return a compact schema string for a single allowed table."""
+    insp = inspect(engine)
+    if not insp.has_table(table_name):
+        return f"(table {table_name} not found)"
+    cols = [c["name"] for c in insp.get_columns(table_name)]
+    preferred = [
+        "Project Name","Bid Name","Article Title","Article Date","Scraped Date",
+        "Article Link","Article Summary","Milestone Mentions",
+        "Location","Groundbreaking Year","Completion Year",
+        "Bid Owner","Bidder Owner","Stage","Engineer","Mechanical Contractor",
+        "Address","Projected Total"
+    ]
+    ordered = [c for c in preferred if c in cols] + [c for c in cols if c not in preferred]
+    return f'{table_name}(' + ", ".join('"' + c + '"' for c in ordered) + ')'
+
+def _looks_safe_select_single_table(sql: str, allowed_table: str) -> tuple[bool, str]:
+    """
+    STRICT guard:
+    - Single SELECT statement
+    - No WITH/UNION/EXCEPT/INTERSECT/JOIN
+    - FROM only the allowed_table
+    - No DML/DDL keywords
+    """
+    s = sql.strip().rstrip(";")
+    low = s.lower()
+
+    if not low.startswith("select"):
+        return False, "Only SELECT queries are allowed."
+
+    if ";" in s:
+        return False, "Multiple statements are not allowed."
+
+    # hard disallow
+    forbidden_keywords = [
+        "insert", "update", "delete", "drop", "alter", "create", "grant",
+        "revoke", "truncate", "comment", "merge", "call", "execute",
+        "with ", " union ", " except ", " intersect ", " join "
+    ]
+    if any(kw in f" {low} " for kw in forbidden_keywords):
+        return False, "Query contains forbidden keywords (must be a simple SELECT)."
+
+    # ensure FROM references only the allowed table
+    import re
+    froms = re.findall(r"\bfrom\s+([a-zA-Z_][\w]*)", low)
+    if not froms:
+        return False, "Missing FROM clause."
+    if any(t != allowed_table for t in froms):
+        bad = [t for t in froms if t != allowed_table][0]
+        return False, f"Table `{bad}` is not allowed. Use `{allowed_table}` only."
+
+    return True, ""
+
+def _ensure_limit(sql: str, default_limit: int = 100) -> str:
+    low = sql.lower()
+    if " limit " in low:
+        return sql
+    return sql.strip().rstrip(";") + f" LIMIT {default_limit}"
+
+SQL_SYS_PROMPT_SINGLE = """You write a SINGLE SQL SELECT for the specified table ONLY.
+Output STRICT JSON: {"sql":"...","notes":"..."}.
+Rules:
+- Use ONLY the provided table and columns. Do not reference any other table.
+- SELECT only. No WITH/CTE, UNION/EXCEPT/INTERSECT, or JOIN of any kind.
+- Use double quotes for columns with spaces, e.g. "Project Name".
+- Keep columns minimal and include ORDER BY when helpful (e.g., "Scraped Date" DESC).
+- Note: date-like columns are TEXT; simple comparisons or ILIKE filters are fine.
+"""
+
+def nl_to_sql_single_table(question: str, table_name: str, schema_text: str) -> dict:
+    """Ask the model for a SQL query against one table. Returns dict with keys: sql, notes."""
+    messages = [
+        {"role":"system","content": SQL_SYS_PROMPT_SINGLE + f"\nTable schema:\n{schema_text}\n\nTarget table: {table_name}"},
+        {"role":"user","content": question},
+    ]
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        response_format={"type":"json_object"},
+        temperature=0.1,
+    )
+    raw = resp.choices[0].message.content
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {"sql":"", "notes":"(non-JSON output)"}
+    return {"sql": data.get("sql","").strip(), "notes": data.get("notes","").strip()}
+
+def summarize_answer(question: str, df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return "I didn’t find matching rows for that."
+    max_rows = 40
+    preview = df.head(max_rows).to_csv(index=False)[:8000]
+    prompt = f"""Answer using only these rows (CSV). If unsure, say so—don’t invent facts.
+Question: {question}
+
+Rows:
+{preview}
+"""
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role":"system","content":"Be concise and precise. Include counts, project names, and key dates/years when helpful."},
+            {"role":"user","content":prompt},
+        ],
+        temperature=0.2,
+    )
+    return resp.choices[0].message.content.strip()
+
+def run_chat_query_single_table(question: str, table_name: str) -> tuple[str, pd.DataFrame, str]:
+    """
+    Execute a safe SELECT for exactly one table.
+    Returns (answer_text, result_df, debug_text).
+    """
+    schema_text = get_table_schema_text(table_name)
+    plan = nl_to_sql_single_table(question, table_name, schema_text)
+    sql = plan.get("sql","")
+    notes = plan.get("notes","")
+
+    if not sql:
+        return ("I couldn’t form a query for that. Try rephrasing.", pd.DataFrame(), notes or "(no SQL)")
+
+    ok, reason = _looks_safe_select_single_table(sql, table_name)
+    if not ok:
+        return (f"Refusing unsafe SQL: {reason}", pd.DataFrame(), sql)
+
+    sql = _ensure_limit(sql)
+    debug = [f"SQL v1 ({table_name}):\n{sql}"]
+
+    try:
+        df = pd.read_sql_query(sql, engine)
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        debug.append("Error v1: " + err)
+        # One auto-fix attempt
+        fix_req = f"""Your previous SQL caused this error:\n{err}\n\nReturn corrected JSON with a valid SELECT (same table: {table_name})."""
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role":"system","content": SQL_SYS_PROMPT_SINGLE + f"\nTable schema:\n{schema_text}\n\nTarget table: {table_name}"},
+                {"role":"user","content": question},
+                {"role":"assistant","content": json.dumps(plan)},
+                {"role":"user","content": fix_req},
+            ],
+            response_format={"type":"json_object"},
+            temperature=0.1,
+        )
+        try:
+            data = json.loads(resp.choices[0].message.content)
+            sql2 = data.get("sql","").strip()
+        except Exception:
+            sql2 = ""
+
+        if not sql2:
+            return ("I couldn’t correct the SQL for that question.", pd.DataFrame(), "\n\n".join(debug))
+
+        ok2, reason2 = _looks_safe_select_single_table(sql2, table_name)
+        if not ok2:
+            return (f"Refusing unsafe SQL after retry: {reason2}", pd.DataFrame(), "\n\n".join(debug+[f"SQL v2:\n{sql2}"]))
+        sql2 = _ensure_limit(sql2)
+        debug.append(f"SQL v2:\n{sql2}")
+        try:
+            df = pd.read_sql_query(sql2, engine)
+            sql = sql2
+        except Exception as e2:
+            debug.append("Error v2: " + f"{type(e2).__name__}: {e2}")
+            return ("I couldn’t execute a valid query for that.", pd.DataFrame(), "\n\n".join(debug))
+
+    answer = summarize_answer(question, df)
+    return (answer, df, "\n\n".join(debug + ([notes] if notes else [])))
 
 
 
@@ -566,7 +741,11 @@ def replace_inputs_from_excel(file) -> int:
 # UI
 # ----------------------------
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Open Bids Dashboard", "General Dashboard", "Inputs", "Archived"])
+page = st.sidebar.radio(
+    "Go to",
+    ["Open Bids Dashboard", "General Dashboard", "Inputs", "Archived", "Chatbot"]
+)
+
 
 
 if page == "Open Bids Dashboard":
@@ -1006,3 +1185,39 @@ elif page == "Archived":
                 st.rerun()
             else:
                 st.info("No rows selected to delete.")
+
+elif page == "Chatbot":
+    st.title("AI Chatbot")
+
+    # Pick the dataset FIRST — hard-limits the bot to that table
+    dataset = st.radio("Choose a dataset", ["Open Bids", "General"], horizontal=True)
+    table_name = "results" if dataset.startswith("Open Bids") else "general"
+
+    # Separate histories per dataset
+    state_key = f"chat_msgs_{table_name}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+
+    # Show chat history
+    for role, content, df_payload in st.session_state[state_key]:
+        with st.chat_message(role):
+            st.markdown(content)
+            if isinstance(df_payload, pd.DataFrame) and not df_payload.empty:
+                st.dataframe(df_payload, use_container_width=True)
+
+    q = st.chat_input(f"Ask about {table_name}…")
+    if q:
+        # user bubble
+        st.session_state[state_key].append(("user", q, None))
+        with st.chat_message("user"):
+            st.markdown(q)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                final_msg, df_ans, dbg = run_chat_query_single_table(q, table_name)
+                st.markdown(final_msg)
+                if df_ans is not None and not df_ans.empty:
+                    st.dataframe(df_ans, use_container_width=True, height=420)
+                with st.expander("Debug (SQL & notes)"):
+                    st.code(dbg)
+                st.session_state[state_key].append(("assistant", final_msg, df_ans))
