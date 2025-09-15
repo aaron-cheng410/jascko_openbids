@@ -18,6 +18,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",   # always start open
 )
 
+st.markdown("""
+<style>
+/* Remove the sidebar hide/collapse chevron */
+div[data-testid="stSidebarCollapsedControl"] { 
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 LOCKED_SIDEBAR_CSS = """
 <style>
