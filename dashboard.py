@@ -18,7 +18,6 @@ hide_streamlit_style = """
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
     .stDeployButton {visibility: hidden;}
     .viewerBadge_link__1S137 {display: none !important;}
     </style>
