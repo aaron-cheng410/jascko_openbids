@@ -747,33 +747,48 @@ elif page == "General Dashboard":
                 d_rng = st.date_input("Scraped Date Range", value=(min_d, max_d))
             else:
                 d_rng = None
-        
-        rowY1, rowY2 = st.columns([2, 2])
 
+
+        # Year filters row (unchanged)
+        rowL1, rowY1, rowY2 = st.columns([2, 2, 3])
+        with rowL1:
+            loc_choices = tokens_for_filter(df.get("Location", pd.Series()))
+            sel_loc = st.multiselect("Location", loc_choices, key="loc_general")
         with rowY1:
             gb_choices_g = years_for_filter(df.get("Groundbreaking Year", pd.Series()))
             sel_gb_years_g = st.multiselect("Groundbreaking Year", gb_choices_g, key="gb_years_general")
-
         with rowY2:
             comp_choices_g = years_for_filter(df.get("Completion Year", pd.Series()))
             sel_comp_years_g = st.multiselect("Completion Year", comp_choices_g, key="comp_years_general")
 
-
+        # ----- Apply filters -----
         view = df.copy()
+
         if sel_proj:
             view = view[view["Project Name"].astype(str).isin(sel_proj)]
+
         if kw:
             mask = (
                 view["Article Title"].fillna("").str.contains(kw, case=False, na=False) |
                 view["Article Summary"].fillna("").str.contains(kw, case=False, na=False)
             )
             view = view[mask]
+
         if isinstance(d_rng, (list, tuple)) and all(d_rng):
             start = pd.to_datetime(d_rng[0])
             end   = pd.to_datetime(d_rng[1]) + pd.Timedelta(days=1)
             view = view[(view["Scraped Date"] >= start) & (view["Scraped Date"] < end)]
-        
-        # Year filters (General)
+
+        # NEW: Location filter (handles multi-value cells separated by " + ")
+        if sel_loc:
+            exploded_loc = view.assign(
+                _loc=view["Location"].fillna("").astype(str).str.split(SPLIT_PATTERN, regex=True)
+            ).explode("_loc")
+            exploded_loc["_loc"] = exploded_loc["_loc"].str.strip()
+            exploded_loc = exploded_loc[exploded_loc["_loc"].isin(sel_loc)]
+            view = exploded_loc.drop(columns="_loc").drop_duplicates()
+
+        # Year filters (unchanged)
         if sel_gb_years_g:
             gb_col = view.get("Groundbreaking Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
             mask_gb = gb_col.apply(lambda s: bool(set(sel_gb_years_g) & set(YEAR_RE.findall(s))))
@@ -783,7 +798,6 @@ elif page == "General Dashboard":
             comp_col = view.get("Completion Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
             mask_comp = comp_col.apply(lambda s: bool(set(sel_comp_years_g) & set(YEAR_RE.findall(s))))
             view = view[mask_comp]
-
 
         def _fix_url(u):
             if pd.isna(u) or not str(u).strip(): return ""
@@ -803,10 +817,7 @@ elif page == "General Dashboard":
                     [c for c in view.columns if c not in display_order]
         )
 
-        # ---- Delete-enabled table (General) ----
-        # ---- Delete-enabled table (General) ----
         import numpy as np
-
         THIS_YEAR = pd.Timestamp.today().year
         gb_ser = view.get("Groundbreaking Year")
         gb_mask = gb_ser.astype(str).str.contains(fr"\b{THIS_YEAR}\b", na=False) if gb_ser is not None else pd.Series(False, index=view.index)
@@ -849,8 +860,6 @@ elif page == "General Dashboard":
                     st.rerun()
                 else:
                     st.info("No rows selected.")
-
-
 
         # Download (without the checkbox column)
         buf = io.StringIO()
