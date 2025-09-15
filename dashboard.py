@@ -1,5 +1,7 @@
 import os
 import io
+import json
+from openai import OpenAI
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text, inspect
