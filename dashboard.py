@@ -15,28 +15,26 @@ import re
 st.set_page_config(
     page_title="Project Updates",
     layout="wide",
-    initial_sidebar_state="expanded",   # keep the sidebar open
+    initial_sidebar_state="expanded",   # always start open
 )
 
-CLEAN_CSS = """
+LOCKED_SIDEBAR_CSS = """
 <style>
-/* Keep header visible so the app layout stays intact */
-
-/* Hide the top-right toolbar (GitHub, Rerun, etc.) */
+/* Hide top-right toolbar (GitHub, rerun, etc.) */
 div[data-testid="stToolbar"] { visibility: hidden; height: 0; }
 
 /* Hide Streamlit Cloud badges / deploy button */
 .stDeployButton { display: none !important; }
 .viewerBadge_link__1S137, .viewerBadge_link__qRIco { display: none !important; }
 
-/* Hide the legacy hamburger menu (… menu) but NOT the header bar */
+/* Hide the legacy '...' Main menu, but keep the header visible */
 #MainMenu { visibility: hidden; }
 
-/* Optional: keep the sidebar always open by hiding its collapse/expand control */
-div[data-testid="stSidebarCollapsedControl"] { display: none; }
+/* Keep the sidebar permanently open: remove the collapse/expand chevron */
+div[data-testid="stSidebarCollapsedControl"] { display: none !important; }
 </style>
 """
-st.markdown(CLEAN_CSS, unsafe_allow_html=True)
+st.markdown(LOCKED_SIDEBAR_CSS, unsafe_allow_html=True)
 
 
 # Use Postgres in prod via env DATABASE_URL; fallback to local SQLite for dev
