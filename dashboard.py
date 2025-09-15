@@ -19,7 +19,23 @@ st.set_page_config(
 )
 
 
+LOCKED_SIDEBAR_CSS = """
+<style>
+/* Hide top-right toolbar (GitHub, rerun, etc.) */
+div[data-testid="stToolbar"] { visibility: hidden; height: 0; }
 
+/* Hide Streamlit Cloud badges / deploy button */
+.stDeployButton { display: none !important; }
+.viewerBadge_link__1S137, .viewerBadge_link__qRIco { display: none !important; }
+
+/* Hide the legacy '...' Main menu, but keep the header visible */
+#MainMenu { visibility: hidden; }
+
+/* Keep the sidebar permanently open: remove the collapse/expand chevron */
+div[data-testid="stSidebarCollapsedControl"] { display: none !important; }
+</style>
+"""
+st.markdown(LOCKED_SIDEBAR_CSS, unsafe_allow_html=True)
 
 # Use Postgres in prod via env DATABASE_URL; fallback to local SQLite for dev
 DATABASE_URL = (
