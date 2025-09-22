@@ -15,27 +15,6 @@ import re
 st.set_page_config(page_title="Project Updates", layout="wide", initial_sidebar_state="expanded")
 
 # One CSS block to handle everything
-st.markdown("""
-<style>
-/* 1) Keep the sidebar visible & remove its collapse toggle */
-div[data-testid="stSidebarCollapsedControl"] { display: none !important; }
-
-/* 2) Hide the top-right Streamlit toolbar (GitHub, Share, etc.) */
-header [data-testid="stToolbar"], 
-header [data-testid="stToolbar"] * {
-    display: none !important;
-}
-
-/* 3) Hide the bottom-right Streamlit Cloud "Manage app" viewer badge */
-a[class^="viewerBadge_"], a[class*=" viewerBadge_"],
-div[class^="viewerBadge_"], div[class*=" viewerBadge_"] {
-    display: none !important;
-}
-
-/* 4) (Optional) hide the tiny status widget when present */
-div[data-testid="stStatusWidget"] { display: none !important; }
-</style>
-""", unsafe_allow_html=True)
 
 # Use Postgres in prod via env DATABASE_URL; fallback to local SQLite for dev
 DATABASE_URL = (
