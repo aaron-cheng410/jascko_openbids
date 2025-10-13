@@ -50,7 +50,7 @@ SPLIT_PATTERN = r"\s*\+\s*"   # split ONLY on ';' or '+' (never commas)
 
 # ---------- ARCHIVE TABLES & HELPERS ----------
 
-
+# ========= Chatbot helpers (single-table, safe SQL) =========
 
 
 from sqlalchemy import MetaData, Table
@@ -111,8 +111,6 @@ GENERAL_KEYS = ["Project Name", "Article Link"]
 def archive_results(rows_df: pd.DataFrame) -> int:
     return _move_rows_oneway("results", "archived_results", RESULTS_KEYS, rows_df)
 
-def archive_general(rows_df: pd.DataFrame) -> int:
-    return _move_rows_oneway("general", "archived_general", GENERAL_KEYS, rows_df)
 
 
 def _insert_rows_sql(table: str, df: pd.DataFrame) -> int:
@@ -145,20 +143,32 @@ def ensure_archived_tables():
     insp = inspect(engine)
 
     def make_like(source_table: str, archive_table: str):
-        if insp.has_table(archive_table):
-            return
         src_cols = get_table_columns(source_table) or []
+
+        if insp.has_table(archive_table):
+            if src_cols:
+                existing = get_table_columns(archive_table) or []
+                to_add = [c for c in src_cols if c not in existing]
+                if to_add:
+                    with engine.begin() as conn:
+                        for c in to_add:
+                            conn.execute(text(f'ALTER TABLE {archive_table} ADD COLUMN "{c}" TEXT'))
+                        if "archived_at" not in existing:
+                            conn.execute(text(f'ALTER TABLE {archive_table} ADD COLUMN archived_at TIMESTAMP'))
+            return
+
         if src_cols:
-            cols_sql = ", ".join(f'{quote_ident(c)} TEXT' for c in src_cols)
+            cols_sql = ", ".join(f'"{c}" TEXT' for c in src_cols)
             ddl = f"CREATE TABLE {archive_table} ({cols_sql}, archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         else:
-            # Minimal shape; will still accept inserts that only include existing columns
             ddl = f"CREATE TABLE {archive_table} (archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         with engine.begin() as conn:
             conn.execute(text(ddl))
 
+    # Results archive unchanged
     make_like("results", "archived_results")
-    make_like("general", "archived_general")
+    # Mirror the *scored* general table
+    make_like("general_internal_scored", "archived_general")
 
 
 
@@ -191,8 +201,8 @@ def archive_results_rows(rows_df: pd.DataFrame):
             )
     return moved
 
-def archive_general_rows(rows_df: pd.DataFrame):
-    """Move rows from general -> archived_general (by Project Name, Article Link)."""
+def archive_general_scored_rows(rows_df: pd.DataFrame):
+    """Move rows from general_internal_scored -> archived_general (by Project Name, Article Link)."""
     if rows_df.empty:
         return 0
     moved = 0
@@ -200,10 +210,12 @@ def archive_general_rows(rows_df: pd.DataFrame):
         moved += _safe_insert_df(rows_df.copy(), "archived_general")
         for _, r in rows_df.iterrows():
             conn.execute(
-                text('DELETE FROM general WHERE "Project Name"=:pn AND "Article Link"=:al'),
+                text('DELETE FROM general_internal_scored WHERE "Project Name"=:pn AND "Article Link"=:al'),
                 {"pn": str(r.get("Project Name","")), "al": str(r.get("Article Link",""))}
             )
     return moved
+
+
 
 
 # ---- Permanently delete FROM ARCHIVE ----
@@ -418,21 +430,23 @@ def seed_inputs_if_empty():
     except Exception as e:
         st.error(f"Failed to seed inputs: {e}")
 
-def ensure_general_table():
+def ensure_general_internal_table():
     """
-    Additive migration for `general`:
+    Additive migration for `general_internal`:
     - Create if missing
     - ADD any missing columns
     - Never drop/recreate
     """
     desired_cols = [
-        "Project Name", "Architect", "Possible Engineer",
+        "Project Name", "Architect", "Developer", "Possible Engineer",
         "Location", "Groundbreaking Year", "Completion Year",
         "Article Title", "Article Date", "Scraped Date",
-        "Article Link", "Article Summary", "Milestone Mentions",
+        "Article Link", "Article Summary",
+        "Milestone Mentions", "Planned Mentions",
+        "Lead Score",
     ]
 
-    existing = get_table_columns("general")
+    existing = get_table_columns("general_internal")
 
     def q(name: str) -> str:
         return '"' + name.replace('"', '""') + '"'
@@ -440,41 +454,62 @@ def ensure_general_table():
     if existing is None:
         with engine.begin() as conn:
             cols_sql = ", ".join(f"{q(c)} TEXT" for c in desired_cols)
-            conn.execute(text(f"CREATE TABLE general ({cols_sql})"))
-            conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_scraped ON general({q('Scraped Date')})"))
+            conn.execute(text(f"CREATE TABLE general_internal ({cols_sql})"))
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_internal_scraped ON general_internal({q('Scraped Date')})"))
         return
 
-    # # Add any missing columns; do NOT drop if extras/order differ
-    # to_add = [c for c in desired_cols if c not in existing]
-    # if to_add:
-    #     with engine.begin() as conn:
-    #         for c in to_add:
-    #             conn.execute(text(f"ALTER TABLE general ADD COLUMN {q(c)} TEXT"))
-    #         conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_scraped ON general({q('Scraped Date')})"))
+    # Add any missing columns
+    to_add = [c for c in desired_cols if c not in existing]
+    if to_add:
+        with engine.begin() as conn:
+            for c in to_add:
+                conn.execute(text(f"ALTER TABLE general_internal ADD COLUMN {q(c)} TEXT"))
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_internal_scraped ON general_internal({q('Scraped Date')})"))
 
 
 @st.cache_data(ttl=60)
 def load_general():
     cols = [
-        "Project Name","Architect","Possible Engineer","Location","Groundbreaking Year","Completion Year","Article Title","Article Date","Scraped Date",
-        "Article Link","Article Summary","Milestone Mentions"
+        "Project Name","Developer","Architect","Possible Engineer","Location", "Territory",
+        "Groundbreaking Year","Completion Year",
+        "Article Title","Article Date","Scraped Date",
+        "Article Link","Article Summary","Milestone Mentions","Planned Mentions",
+        "Lead Score",
+      
+        "Qualified","Justification"
     ]
-    q = f"SELECT {', '.join(quote_ident(c) for c in cols)} FROM general ORDER BY {quote_ident('Scraped Date')} DESC"
+
+    q = f"""
+    SELECT {', '.join(quote_ident(c) for c in cols if c in (get_table_columns('general_internal_scored') or []))}
+    FROM general_internal_scored
+    WHERE "Qualified" = 'Yes'
+    ORDER BY COALESCE(NULLIF("Scraped Date", ''), '1900-01-01')::date DESC,
+             "Article Date" DESC NULLS LAST
+    """
     df = pd.read_sql(q, engine)
     if "Scraped Date" in df.columns:
         df["Scraped Date"] = pd.to_datetime(df["Scraped Date"], errors="coerce")
     return df
 
+
 def reorder_general(df: pd.DataFrame) -> pd.DataFrame:
-    priority = ["Project Name","Architect"] + [
-        "Possible Engineer","Location","Groundbreaking Year","Completion Year","Article Title","Article Date","Scraped Date","Article Link","Article Summary","Milestone Mentions"
+    priority = [
+        "Project Name", "Lead Score",
+        "Architect", "Developer", "Possible Engineer",
+        "Location",
+        "Groundbreaking Year","Completion Year",
+        "Article Title","Article Date","Scraped Date",
+        "Article Link","Article Summary",
+        "Milestone Mentions","Planned Mentions", "Topic"
     ]
+
     order = [c for c in priority if c in df.columns] + [c for c in df.columns if c not in priority]
     return df[order]
 
 
 # Bootstrap/migrate schema every start
-ensure_general_table()
+
+ensure_general_internal_table()
 ensure_inputs_table(EXPECTED_INPUT_COLS)
 ensure_results_table(EXPECTED_INPUT_COLS)
 ensure_archived_tables()
@@ -680,10 +715,13 @@ if page == "Open Bids Dashboard":
             column_config={
                 "__archive__": st.column_config.CheckboxColumn("Archive?", help="Move this row to Archive"),
                 "⭐ Groundbreaking This Year": st.column_config.TextColumn(
-                    "⭐ Groundbreaking This Year",
-                    help=f"Groundbreaking Year == {THIS_YEAR}"
+                    "⭐ Groundbreaking This Year", help=f"Groundbreaking Year == {THIS_YEAR}"
                 ),
-                "Article Link": st.column_config.LinkColumn("Article Link", display_text="Click to open"),
+                "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
+                "Article Summary": st.column_config.TextColumn(width="large"),
+                "Milestone Mentions": st.column_config.TextColumn(width="large"),
+                "Planned Mentions": st.column_config.TextColumn(width="large"),
+                "Developer": st.column_config.TextColumn("Developer"),
             },
             disabled=[c for c in view_for_edit.columns if c != "__archive__"],
             hide_index=True,
@@ -725,8 +763,14 @@ elif page == "General Dashboard":
             sel_proj = st.multiselect("Project Name", projects)
 
         with col2:
-            # quick free-text search across title/summary
-            kw = st.text_input("Search Title/Summary")
+            # Lead Score range (1–5). Works even if the column is text.
+            lead_min, lead_max = 1, 4
+            if "Lead Score" in df.columns:
+                # coerce to int safely
+                lead_series = pd.to_numeric(df["Lead Score"], errors="coerce").fillna(0).astype(int)
+                lead_min = max(1, int(lead_series.min())) if not lead_series.empty else 1
+                lead_max = min(4, int(lead_series.max())) if not lead_series.empty else 4
+            lead_range = st.slider("Lead Score", min_value=1, max_value=4, value=(lead_min, lead_max))
 
         with col3:
             # scraped date range
@@ -739,13 +783,31 @@ elif page == "General Dashboard":
 
 
         # Year filters row (unchanged)
-        rowL1, rowY1, rowY2 = st.columns([2, 2, 3])
+        rowL1, rowT1, rowY2 = st.columns([2, 2, 3])
         with rowL1:
             loc_choices = tokens_for_filter(df.get("Location", pd.Series()))
             sel_loc = st.multiselect("Location", loc_choices, key="loc_general")
-        with rowY1:
-            gb_choices_g = years_for_filter(df.get("Groundbreaking Year", pd.Series()))
-            sel_gb_years_g = st.multiselect("Groundbreaking Year", gb_choices_g, key="gb_years_general")
+        with rowT1:
+            TERR_ORDER = [
+                "Dade / Monroe",
+                "Broward / Palm Beach / Martin / St. Lucie",
+                "Greater Tampa / Fort Myers",
+                "Orlando",
+            ]
+            terr_series = df.get("Territory", pd.Series(dtype=str)).fillna("").astype(str)
+
+            # collect unique tokens, respecting your " + " splitter if ever multi-valued
+            terr_tokens = set()
+            for cell in terr_series:
+                for t in re.split(SPLIT_PATTERN, cell):
+                    t = t.strip()
+                    if t:
+                        terr_tokens.add(t)
+
+            # show known territories first if present; otherwise fall back to full known list
+            terr_choices = [t for t in TERR_ORDER if t in terr_tokens] or TERR_ORDER
+            sel_territory = st.multiselect("Territory", terr_choices, key="territory_general")
+
         with rowY2:
             comp_choices_g = years_for_filter(df.get("Completion Year", pd.Series()))
             sel_comp_years_g = st.multiselect("Completion Year", comp_choices_g, key="comp_years_general")
@@ -756,12 +818,9 @@ elif page == "General Dashboard":
         if sel_proj:
             view = view[view["Project Name"].astype(str).isin(sel_proj)]
 
-        if kw:
-            mask = (
-                view["Article Title"].fillna("").str.contains(kw, case=False, na=False) |
-                view["Article Summary"].fillna("").str.contains(kw, case=False, na=False)
-            )
-            view = view[mask]
+        if "Lead Score" in view.columns:
+            _ls = pd.to_numeric(view["Lead Score"], errors="coerce").fillna(0).astype(int)
+            view = view[(_ls >= lead_range[0]) & (_ls <= lead_range[1])]
 
         if isinstance(d_rng, (list, tuple)) and all(d_rng):
             start = pd.to_datetime(d_rng[0])
@@ -778,10 +837,14 @@ elif page == "General Dashboard":
             view = exploded_loc.drop(columns="_loc").drop_duplicates()
 
         # Year filters (unchanged)
-        if sel_gb_years_g:
-            gb_col = view.get("Groundbreaking Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
-            mask_gb = gb_col.apply(lambda s: bool(set(sel_gb_years_g) & set(YEAR_RE.findall(s))))
-            view = view[mask_gb]
+        if sel_territory:
+            exploded_terr = view.assign(
+                _terr=view["Territory"].fillna("").astype(str).str.split(SPLIT_PATTERN, regex=True)
+            ).explode("_terr")
+            exploded_terr["_terr"] = exploded_terr["_terr"].str.strip()
+            exploded_terr = exploded_terr[exploded_terr["_terr"].isin(sel_territory)]
+            view = exploded_terr.drop(columns="_terr").drop_duplicates()
+
 
         if sel_comp_years_g:
             comp_col = view.get("Completion Year", pd.Series(index=view.index, dtype=str)).fillna("").astype(str)
@@ -797,25 +860,21 @@ elif page == "General Dashboard":
         view = reorder_general(view)
 
         display_order = [
-            "Project Name","Architect","Possible Engineer","Location",
+            "Project Name", "Lead Score",
+            "Architect","Developer","Possible Engineer","Location", "Territory",
             "Article Title","Article Date","Scraped Date",
-            "Article Link","Article Summary","Milestone Mentions",
+            "Article Link","Article Summary","Milestone Mentions","Planned Mentions", "Justification"
         ]
+
         view = view.reindex(
             columns=[c for c in display_order if c in view.columns] +
                     [c for c in view.columns if c not in display_order]
         )
 
-        import numpy as np
-        THIS_YEAR = pd.Timestamp.today().year
-        gb_ser = view.get("Groundbreaking Year")
-        gb_mask = gb_ser.astype(str).str.contains(fr"\b{THIS_YEAR}\b", na=False) if gb_ser is not None else pd.Series(False, index=view.index)
-
         view_for_edit = view.copy()
         view_for_edit["__archive__"] = False
-        view_for_edit["⭐ Groundbreaking This Year"] = np.where(gb_mask, "⭐", "")
 
-        lead_cols = ["__archive__", "⭐ Groundbreaking This Year"]
+        lead_cols = ["__archive__"]
         view_for_edit = view_for_edit.reindex(
             columns=lead_cols + [c for c in view_for_edit.columns if c not in lead_cols]
         )
@@ -826,9 +885,6 @@ elif page == "General Dashboard":
             height=600,
             column_config={
                 "__archive__": st.column_config.CheckboxColumn("Archive?", help="Move this row to Archive"),
-                "⭐ Groundbreaking This Year": st.column_config.TextColumn(
-                    "⭐ Groundbreaking This Year", help=f"Groundbreaking Year == {THIS_YEAR}"
-                ),
                 "Article Link": st.column_config.LinkColumn("Article Link", display_text="Open"),
                 "Article Summary": st.column_config.TextColumn(width="large"),
                 "Milestone Mentions": st.column_config.TextColumn(width="large"),
@@ -837,12 +893,13 @@ elif page == "General Dashboard":
             hide_index=True,
         )
 
+
         to_archive_df = edited[edited["__archive__"]].drop(columns="__archive__", errors="ignore")
 
         col_del, _ = st.columns([1, 3])
         with col_del:
             if st.button("Archive selected rows", type="primary", key="archive_general"):
-                count = archive_general_rows(to_archive_df)
+                count = archive_general_scored_rows(to_archive_df)
                 if count > 0:
                     load_general.clear()
                     load_archived_general.clear()
@@ -995,5 +1052,4 @@ elif page == "Archived":
                 st.rerun()
             else:
                 st.info("No rows selected to delete.")
-
 
