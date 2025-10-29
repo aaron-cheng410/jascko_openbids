@@ -266,17 +266,21 @@ def reorder_for_dashboard(df: pd.DataFrame) -> pd.DataFrame:
     if "Bid Name" in cols:
         new_order.append("Bid Name")
 
-    # 2) Article cols (only those that exist)
+    # 2) Article Link (if exists)
+    if "Article Link" in cols:
+        new_order.append("Article Link")
+
+    # 3) Remaining article columns (except Article Link)
     for c in ARTICLE_COLS:
-        if c in cols:
+        if c in cols and c not in new_order:
             new_order.append(c)
 
-    # 3) Remaining input cols (excluding Bid Name)
+    # 4) Remaining input cols
     for c in EXPECTED_INPUT_COLS:
-        if c != "Bid Name" and c in cols and c not in new_order:
+        if c not in new_order and c in cols:
             new_order.append(c)
 
-    # 4) Anything left (safety)
+    # 5) Anything else
     for c in cols:
         if c not in new_order:
             new_order.append(c)
@@ -860,10 +864,10 @@ elif page == "General Dashboard":
         view = reorder_general(view)
 
         display_order = [
-            "Project Name", "Lead Score",
+            "Project Name", "Article Link", "Lead Score",
             "Architect","Developer","Possible Engineer","Location", "Territory",
             "Article Title","Article Date","Scraped Date",
-            "Article Link","Article Summary","Milestone Mentions","Planned Mentions", "Justification"
+            "Article Summary","Milestone Mentions","Planned Mentions", "Justification"
         ]
 
         view = view.reindex(
