@@ -487,6 +487,7 @@ def load_general():
     SELECT {', '.join(quote_ident(c) for c in cols if c in (get_table_columns('general_internal_scored') or []))}
     FROM general_internal_scored
     WHERE "Qualified" = 'Yes'
+      AND COALESCE(NULLIF("Territory", ''), '') <> ''
     ORDER BY COALESCE(NULLIF("Scraped Date", ''), '1900-01-01')::date DESC,
              "Article Date" DESC NULLS LAST
     """
