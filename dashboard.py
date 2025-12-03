@@ -494,6 +494,9 @@ def load_general():
     if "Scraped Date" in df.columns:
         df["Scraped Date"] = pd.to_datetime(df["Scraped Date"], errors="coerce")
 
+    if "Groundbreaking Year" in df.columns: 
+        df = df[~df["Groundbreaking Year"].astype(str).str.contains(r"\b2025\b", na=False)]
+
    
     return df
 
