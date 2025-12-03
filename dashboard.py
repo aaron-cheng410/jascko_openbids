@@ -474,7 +474,7 @@ def ensure_general_internal_table():
 @st.cache_data(ttl=60)
 def load_general():
     cols = [
-        "Project Name","Developer","Architect","Possible Engineer","Location", "Territory",
+        "Project Name","Developer","Architect","Possible Engineer","Location", "Address","Territory",
         "Groundbreaking Year","Completion Year",
         "Article Title","Article Date","Scraped Date",
         "Article Link","Article Summary","Milestone Mentions","Planned Mentions",
@@ -487,7 +487,6 @@ def load_general():
     SELECT {', '.join(quote_ident(c) for c in cols if c in (get_table_columns('general_internal_scored') or []))}
     FROM general_internal_scored
     WHERE "Qualified" = 'Yes'
-      AND COALESCE(NULLIF("Territory", ''), '') <> ''
     ORDER BY COALESCE(NULLIF("Scraped Date", ''), '1900-01-01')::date DESC,
              "Article Date" DESC NULLS LAST
     """
@@ -504,7 +503,7 @@ def reorder_general(df: pd.DataFrame) -> pd.DataFrame:
     priority = [
         "Project Name", "Lead Score",
         "Architect", "Developer", "Possible Engineer",
-        "Location",
+        "Location", "Address",
         "Groundbreaking Year","Completion Year",
         "Article Title","Article Date","Scraped Date",
         "Article Link","Article Summary",
