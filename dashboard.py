@@ -877,7 +877,7 @@ elif page == "General Dashboard":
 
         view = view.reindex(
             columns=[c for c in display_order if c in view.columns] +
-                    [c for c in view.columns if c not in display_order]
+                    [c for c in view.columns if c not in display_order and c != "Location"]
         )
 
         view_for_edit = view.copy()
