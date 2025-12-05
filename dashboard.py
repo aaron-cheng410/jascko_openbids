@@ -870,9 +870,9 @@ elif page == "General Dashboard":
 
         display_order = [
             "Project Name", "Article Link", "Lead Score",
-            "Architect","Developer","Possible Engineer","Location", "Territory",
-            "Article Title","Article Date","Scraped Date",
-            "Article Summary","Milestone Mentions","Planned Mentions", "Justification"
+            "Architect", "Developer", "Possible Engineer", "Address", "Territory",
+            "Article Title", "Article Date", "Scraped Date",
+            "Article Summary", "Milestone Mentions", "Planned Mentions", "Justification"
         ]
 
         view = view.reindex(
