@@ -936,7 +936,7 @@ elif page == "General Dashboard":
 
         if st.button("Reset Cache"):
             st.cache_data.clear()
-            st.experimental_rerun()
+            st.rerun()
 
 
 
