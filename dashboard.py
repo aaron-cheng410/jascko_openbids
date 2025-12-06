@@ -934,6 +934,10 @@ elif page == "General Dashboard":
         view.to_csv(buf, index=False)
         st.download_button("Download filtered CSV", buf.getvalue(), "general_sfl.csv", "text/csv")
 
+        if st.button("Reset Cache"):
+            st.cache_data.clear()
+            st.experimental_rerun()
+
 
 
 elif page == "Inputs":
