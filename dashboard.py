@@ -486,7 +486,6 @@ def load_general():
     q = f"""
     SELECT {', '.join(quote_ident(c) for c in cols if c in (get_table_columns('general_internal_scored') or []))}
     FROM general_internal_scored
-    WHERE "Qualified" = 'Yes'
     ORDER BY COALESCE(NULLIF("Scraped Date", ''), '1900-01-01')::date DESC,
              "Article Date" DESC NULLS LAST
     """
@@ -494,8 +493,8 @@ def load_general():
     if "Scraped Date" in df.columns:
         df["Scraped Date"] = pd.to_datetime(df["Scraped Date"], errors="coerce")
 
-    if "Groundbreaking Year" in df.columns: 
-        df = df[~df["Groundbreaking Year"].astype(str).str.contains(r"\b2025\b", na=False)]
+    # if "Groundbreaking Year" in df.columns: 
+    #     df = df[~df["Groundbreaking Year"].astype(str).str.contains(r"\b2025\b", na=False)]
 
    
     return df
