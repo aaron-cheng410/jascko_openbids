@@ -1089,20 +1089,49 @@ elif page == "Archived":
 elif page == "Debug — General Loader Test":
     st.title("Debug — General Loader Test")
 
-    st.subheader("Database: general_internal_scored (FULL TABLE)")
+    st.subheader("Database: general_internal_scored (FULL TABLE, cleaned)")
 
     try:
         # Load entire table, no limits, no caching
         df_db = pd.read_sql("SELECT * FROM general_internal_scored", engine)
 
+        # ---- Remove unwanted columns if present ----
+        drop_cols = ["id", "Location", "Justification"]
+        df_db = df_db.drop(columns=[c for c in drop_cols if c in df_db.columns], errors="ignore")
+
+        # ---- Make Article Link clickable ----
+        if "Article Link" in df_db.columns:
+            def _fix_url(u):
+                if pd.isna(u) or not str(u).strip():
+                    return ""
+                u = str(u).strip()
+                return u if u.startswith(("http://", "https://")) else "https://" + u
+
+            df_db["Article Link"] = df_db["Article Link"].map(_fix_url)
+
+            st.data_editor(
+                df_db,
+                use_container_width=True,
+                height=800,
+                column_config={
+                    "Article Link": st.column_config.LinkColumn(
+                        "Article Link",
+                        display_text="Open"
+                    )
+                },
+                disabled=True,   # make read-only
+                hide_index=True
+            )
+        else:
+            # Fallback if no link column
+            st.dataframe(df_db, use_container_width=True, height=800)
+
         st.write(f"Total rows: {len(df_db)}")
         st.write(f"Total columns: {len(df_db.columns)}")
 
-        # Show complete dataframe (Streamlit will virtualize rows if large)
-        st.dataframe(df_db, use_container_width=True, height=800)
-
     except Exception as e:
         st.error(f"Failed to load DB table: {e}")
+
 
 
 
