@@ -607,8 +607,15 @@ def replace_inputs_from_excel(file) -> int:
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
     "Go to",
-    ["Open Bids Dashboard", "General Dashboard", "Inputs", "Archived"]
+    [
+        "Open Bids Dashboard",
+        "General Dashboard",
+        "Inputs",
+        "Archived",
+        "Debug — General Loader Test"
+    ]
 )
+
 
 
 
@@ -1078,4 +1085,58 @@ elif page == "Archived":
                 st.rerun()
             else:
                 st.info("No rows selected to delete.")
+
+elif page == "Debug — General Loader Test":
+    st.title("Debug — General Loader Test")
+
+    st.write("This page shows EXACT raw data from both sources with no filters or transformations.")
+
+    st.subheader("A) Database: general_internal_scored")
+
+    try:
+        df_db = pd.read_sql("SELECT * FROM general_internal_scored", engine)
+        st.write(f"Row count (DB): {len(df_db)}")
+        st.dataframe(df_db.head(20), use_container_width=True)
+    except Exception as e:
+        st.error(f"Failed to load DB table: {e}")
+        df_db = pd.DataFrame()
+
+    st.divider()
+
+    st.subheader("B) CSV: general_internal_scored.csv")
+
+    try:
+        df_csv = pd.read_csv("general_internal_scored.csv", dtype=str, keep_default_na=False)
+        st.write(f"Row count (CSV): {len(df_csv)}")
+        st.dataframe(df_csv.head(20), use_container_width=True)
+    except Exception as e:
+        st.error(f"Failed to load CSV: {e}")
+        df_csv = pd.DataFrame()
+
+    st.divider()
+
+    if not df_db.empty and not df_csv.empty:
+        st.subheader("C) Compare Row Counts")
+
+        n_db = len(df_db)
+        n_csv = len(df_csv)
+
+        if n_db == n_csv:
+            st.success(f"Row count matches! Both have {n_db} rows.")
+        else:
+            st.warning(f"Mismatch: DB has {n_db}, CSV has {n_csv}")
+
+        # Optional: show which primary keys differ (if Project Name + Article Link exist)
+        if "Project Name" in df_db.columns and "Article Link" in df_db.columns:
+            db_keys = set(zip(df_db["Project Name"], df_db["Article Link"]))
+            csv_keys = set(zip(df_csv["Project Name"], df_csv["Article Link"]))
+
+            missing_in_csv = db_keys - csv_keys
+            missing_in_db = csv_keys - db_keys
+
+            if missing_in_csv:
+                st.error(f"{len(missing_in_csv)} rows exist in DB but NOT in CSV.")
+            if missing_in_db:
+                st.error(f"{len(missing_in_db)} rows exist in CSV but NOT in DB.")
+
 
