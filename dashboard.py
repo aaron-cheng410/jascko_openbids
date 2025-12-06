@@ -609,10 +609,10 @@ page = st.sidebar.radio(
     "Go to",
     [
         "Open Bids Dashboard",
-        "General Dashboard",
+        "General Dashboard (Do not use)",
         "Inputs",
         "Archived",
-        "Debug — General Loader Test"
+        "General Dashboard RAW Results"
     ]
 )
 
@@ -1086,8 +1086,8 @@ elif page == "Archived":
             else:
                 st.info("No rows selected to delete.")
 
-elif page == "Debug — General Loader Test":
-    st.title("Debug — General Loader Test")
+elif page == "General Dashboard RAW Results":
+    st.title("General Dashboard Raw Results")
 
     st.subheader("Database: general_internal_scored (FULL TABLE, ordered)")
 
