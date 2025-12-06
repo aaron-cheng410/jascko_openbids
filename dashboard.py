@@ -1089,18 +1089,27 @@ elif page == "Archived":
 elif page == "Debug — General Loader Test":
     st.title("Debug — General Loader Test")
 
-    st.subheader("Database: general_internal_scored (FULL TABLE, cleaned)")
+    st.subheader("Database: general_internal_scored (FULL TABLE, ordered)")
 
     try:
-        # Load entire table, no limits, no caching
-        df_db = pd.read_sql("SELECT * FROM general_internal_scored", engine)
+        # Load all rows, ordered by Scraped Date DESC (handles text dates too)
+        df_db = pd.read_sql("""
+            SELECT * 
+            FROM general_internal_scored
+            ORDER BY 
+                CASE 
+                    WHEN "Scraped Date" IS NULL OR "Scraped Date" = '' THEN NULL 
+                    ELSE "Scraped Date" 
+                END DESC
+        """, engine)
 
-        # ---- Remove unwanted columns if present ----
+        # ---- Remove unwanted columns ----
         drop_cols = ["id", "Location", "Justification"]
         df_db = df_db.drop(columns=[c for c in drop_cols if c in df_db.columns], errors="ignore")
 
         # ---- Make Article Link clickable ----
         if "Article Link" in df_db.columns:
+
             def _fix_url(u):
                 if pd.isna(u) or not str(u).strip():
                     return ""
@@ -1119,11 +1128,10 @@ elif page == "Debug — General Loader Test":
                         display_text="Open"
                     )
                 },
-                disabled=True,   # make read-only
+                disabled=True,
                 hide_index=True
             )
         else:
-            # Fallback if no link column
             st.dataframe(df_db, use_container_width=True, height=800)
 
         st.write(f"Total rows: {len(df_db)}")
