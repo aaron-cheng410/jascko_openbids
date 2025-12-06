@@ -471,7 +471,14 @@ def ensure_general_internal_table():
             conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_internal_scraped ON general_internal({q('Scraped Date')})"))
 
 
-
+def load_general_from_csv(path="general_internal_scored.csv"):
+    try:
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+        return df
+    except Exception as e:
+        st.error(f"Failed to load CSV: {e}")
+        return pd.DataFrame()
+        
 @st.cache_data(ttl=60)
 def load_general():
     return pd.read_sql('SELECT * FROM general_internal_scored', engine)
@@ -764,7 +771,7 @@ if page == "Open Bids Dashboard":
 elif page == "General Dashboard":
     st.title("South Florida — General Developments")
 
-    df = load_general()
+    df = load_general_from_csv()
     if df.empty:
         st.info("No results yet. Run general_scraper.py to populate the 'general' table.")
     else:
