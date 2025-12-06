@@ -609,7 +609,6 @@ page = st.sidebar.radio(
     "Go to",
     [
         "Open Bids Dashboard",
-        "General Dashboard (Do not use)",
         "Inputs",
         "Archived",
         "General Dashboard RAW Results"
