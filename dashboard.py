@@ -471,33 +471,37 @@ def ensure_general_internal_table():
             conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_general_internal_scraped ON general_internal({q('Scraped Date')})"))
 
 
+
 @st.cache_data(ttl=60)
 def load_general():
-    cols = [
-        "Project Name","Developer","Architect","Possible Engineer","Location", "Address","Territory",
-        "Groundbreaking Year","Completion Year",
-        "Article Title","Article Date","Scraped Date",
-        "Article Link","Article Summary","Milestone Mentions","Planned Mentions",
-        "Lead Score",
+    return pd.read_sql('SELECT * FROM general_internal_scored', engine)
+
+# def load_general():
+#     cols = [
+#         "Project Name","Developer","Architect","Possible Engineer","Location", "Address","Territory",
+#         "Groundbreaking Year","Completion Year",
+#         "Article Title","Article Date","Scraped Date",
+#         "Article Link","Article Summary","Milestone Mentions","Planned Mentions",
+#         "Lead Score",
       
-        "Qualified","Justification"
-    ]
+#         "Qualified","Justification"
+#     ]
 
-    q = f"""
-    SELECT {', '.join(quote_ident(c) for c in cols if c in (get_table_columns('general_internal_scored') or []))}
-    FROM general_internal_scored
-    ORDER BY COALESCE(NULLIF("Scraped Date", ''), '1900-01-01')::date DESC,
-             "Article Date" DESC NULLS LAST
-    """
-    df = pd.read_sql(q, engine)
-    if "Scraped Date" in df.columns:
-        df["Scraped Date"] = pd.to_datetime(df["Scraped Date"], errors="coerce")
+#     q = f"""
+#     SELECT {', '.join(quote_ident(c) for c in cols if c in (get_table_columns('general_internal_scored') or []))}
+#     FROM general_internal_scored
+#     ORDER BY COALESCE(NULLIF("Scraped Date", ''), '1900-01-01')::date DESC,
+#              "Article Date" DESC NULLS LAST
+#     """
+#     df = pd.read_sql(q, engine)
+#     if "Scraped Date" in df.columns:
+#         df["Scraped Date"] = pd.to_datetime(df["Scraped Date"], errors="coerce")
 
-    # if "Groundbreaking Year" in df.columns: 
-    #     df = df[~df["Groundbreaking Year"].astype(str).str.contains(r"\b2025\b", na=False)]
+#     # if "Groundbreaking Year" in df.columns: 
+#     #     df = df[~df["Groundbreaking Year"].astype(str).str.contains(r"\b2025\b", na=False)]
 
    
-    return df
+#     return df
 
 
 def reorder_general(df: pd.DataFrame) -> pd.DataFrame:
