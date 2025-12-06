@@ -1133,8 +1133,6 @@ elif page == "General Dashboard RAW Results":
         else:
             st.dataframe(df_db, use_container_width=True, height=800)
 
-        st.write(f"Total rows: {len(df_db)}")
-        st.write(f"Total columns: {len[df_db.columns)}")
 
     except Exception as e:
         st.error(f"Failed to load DB table: {e}")
