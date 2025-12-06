@@ -785,13 +785,16 @@ elif page == "General Dashboard":
             lead_range = st.slider("Lead Score", min_value=1, max_value=4, value=(lead_min, lead_max))
 
         with col3:
-            # scraped date range
-            if df["Scraped Date"].notna().any():
-                min_d = df["Scraped Date"].min().date()
-                max_d = df["Scraped Date"].max().date()
-                d_rng = st.date_input("Scraped Date Range", value=(min_d, max_d))
-            else:
-                d_rng = None
+            st.write("")     # keep layout clean
+            d_rng = None
+        # with col3:
+        #     # scraped date range
+        #     if df["Scraped Date"].notna().any():
+        #         min_d = df["Scraped Date"].min().date()
+        #         max_d = df["Scraped Date"].max().date()
+        #         d_rng = st.date_input("Scraped Date Range", value=(min_d, max_d))
+        #     else:
+        #         d_rng = None
 
 
         # Year filters row (unchanged)
@@ -834,10 +837,10 @@ elif page == "General Dashboard":
             _ls = pd.to_numeric(view["Lead Score"], errors="coerce").fillna(0).astype(int)
             view = view[(_ls >= lead_range[0]) & (_ls <= lead_range[1])]
 
-        if isinstance(d_rng, (list, tuple)) and all(d_rng):
-            start = pd.to_datetime(d_rng[0])
-            end   = pd.to_datetime(d_rng[1]) + pd.Timedelta(days=1)
-            view = view[(view["Scraped Date"] >= start) & (view["Scraped Date"] < end)]
+        # if isinstance(d_rng, (list, tuple)) and all(d_rng):
+        #     start = pd.to_datetime(d_rng[0])
+        #     end   = pd.to_datetime(d_rng[1]) + pd.Timedelta(days=1)
+        #     view = view[(view["Scraped Date"] >= start) & (view["Scraped Date"] < end)]
 
         # NEW: Location filter (handles multi-value cells separated by " + ")
         if sel_loc:
