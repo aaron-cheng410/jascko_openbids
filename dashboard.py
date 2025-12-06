@@ -1088,13 +1088,13 @@ elif page == "Archived":
 elif page == "General Dashboard RAW Results":
     st.title("General Dashboard Raw Results")
 
-    st.subheader("Database: general_internal_scored (FULL TABLE, ordered)")
 
     try:
-        # Load all rows, ordered by Scraped Date DESC (handles text dates too)
+        # Load all rows where Qualified = 'Yes'
         df_db = pd.read_sql("""
             SELECT * 
             FROM general_internal_scored
+            WHERE "Qualified" = 'Yes'
             ORDER BY 
                 CASE 
                     WHEN "Scraped Date" IS NULL OR "Scraped Date" = '' THEN NULL 
@@ -1134,10 +1134,11 @@ elif page == "General Dashboard RAW Results":
             st.dataframe(df_db, use_container_width=True, height=800)
 
         st.write(f"Total rows: {len(df_db)}")
-        st.write(f"Total columns: {len(df_db.columns)}")
+        st.write(f"Total columns: {len[df_db.columns)}")
 
     except Exception as e:
         st.error(f"Failed to load DB table: {e}")
+
 
 
 
